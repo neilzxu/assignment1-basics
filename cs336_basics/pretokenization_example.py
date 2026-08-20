@@ -1,4 +1,7 @@
+from collections import Counter
+import multiprocessing as mp
 import os
+import regex as re
 from typing import BinaryIO
 
 
@@ -56,7 +59,24 @@ with open(..., "rb") as f:
 
     # The following is a serial implementation, but you can parallelize this
     # by sending each start/end pair to a set of processes.
-    for start, end in zip(boundaries[:-1], boundaries[1:]):
+    # for start, end in zip(boundaries[:-1], boundaries[1:]):
+    #     f.seek(start)
+    #     chunk = f.read(end - start).decode("utf-8", errors="ignore")
+    #     # Run pre-tokenization on your chunk and store the counts for each pre-token
+    #
+    def pretokenize(text):
+        PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+        return re.findall(PAT, text)
+
+    def process_chunk(start, end):
         f.seek(start)
         chunk = f.read(end - start).decode("utf-8", errors="ignore")
+        pretokens = pretokenize(chunk)
+        pretoken_bytes = [pretoken.decode("utf-8") for pretoken in pretokens] # create list of bytes from each pre-token
+        pretoken_byte_pairs = [list(zip(pretoken_bytes[:-1], pretoken_bytes[1:])) if len(pretoken_bytes) > 1 else [] for pretoken_bytes in pretoken_bytes]
+
+        count_map = Counter(list(chunk))
+        return chunk
+    with mp.Pool(processes=mp.cpu_count()) as pool:
+        chunks = pool.starmap(read_chunk, zip(boundares[:-1], boundaries[1:]))
         # Run pre-tokenization on your chunk and store the counts for each pre-token
