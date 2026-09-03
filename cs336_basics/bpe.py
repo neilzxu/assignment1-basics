@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import heapq
+import multiprocessing as mp
 import os
+from collections import Counter
 from collections.abc import Iterable
+from dataclasses import dataclass
+from itertools import pairwise
 from typing import IO, Any, BinaryIO
 
 import numpy.typing as npt
+import regex as re
 import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
-
-import cs336_basics.bpe as bpe
 
 
 def run_linear(
@@ -564,6 +568,188 @@ def get_tokenizer(
     raise NotImplementedError
 
 
+def find_chunk_boundaries(
+    file: BinaryIO,
+    desired_num_chunks: int,
+    split_special_token: bytes,
+) -> list[int]:
+    """
+    Chunk the file into parts that can be counted independently.
+    May return fewer chunks if the boundaries end up overlapping.
+    """
+    assert isinstance(split_special_token, bytes), "Must represent special token as a bytestring"
+
+    # Get total file size in bytes
+    file.seek(0, os.SEEK_END)
+    file_size = file.tell()
+    file.seek(0)
+
+    chunk_size = file_size // desired_num_chunks
+
+    # Initial guesses for chunk boundary locations, uniformly spaced
+    # Chunks start on previous index, don't include last index
+    chunk_boundaries = [i * chunk_size for i in range(desired_num_chunks + 1)]
+    chunk_boundaries[-1] = file_size
+
+    mini_chunk_size = 4096  # Read ahead by 4k bytes at a time
+
+    for bi in range(1, len(chunk_boundaries) - 1):
+        initial_position = chunk_boundaries[bi]
+        file.seek(initial_position)  # Start at boundary guess
+        while True:
+            mini_chunk = file.read(mini_chunk_size)  # Read a mini chunk
+
+            # If EOF, this boundary should be at the end of the file
+            if mini_chunk == b"":
+                chunk_boundaries[bi] = file_size
+                break
+
+            # Find the special token in the mini chunk
+            found_at = mini_chunk.find(split_special_token)
+            if found_at != -1:
+                chunk_boundaries[bi] = initial_position + found_at
+                break
+            initial_position += mini_chunk_size
+
+    # Make sure all boundaries are unique, but might be fewer than desired_num_chunks
+    return sorted(set(chunk_boundaries))
+
+
+_PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+
+
+def process_chunk(input_path, special_tokens: list[str], start: int, end: int):
+    """Process a chunk of text into a map of counts of pairs of bytes"""
+    with open(input_path, "rb") as f:
+        f.seek(start)
+        chunk = f.read(end - start).decode("utf-8", errors="ignore")
+        split_chunks = re.split("|".join([re.escape(st) for st in special_tokens]), chunk)
+
+        bp_map = {}
+        idx_sent_list = []
+        for split_chunk in split_chunks:
+            for match in re.finditer(_PAT, split_chunk):
+                pretoken = match.group(0)
+                bytestr = pretoken.encode("utf-8")
+                idx_sent = []
+                for i in range(len(bytestr) - 1):
+                    cur_idx = bytestr[i]
+                    next_idx = bytestr[i + 1]
+                    pair = (cur_idx, next_idx)
+                    bp_map[pair] = bp_map.get(pair, 0) + 1
+                    idx_sent.append(cur_idx)
+                idx_sent.append(bytestr[-1])
+                idx_sent_list.append(idx_sent)
+
+        return bp_map, idx_sent_list
+
+
+def update_and_count_idx_sent_list(
+    idx_pair: tuple[int, int],
+    repl_idx: int,
+    i: int,
+    count_map: dict[tuple[int, int], int],
+    idx_sent_corpus: list[list[int]],
+) -> None:
+    idx_1, idx_2 = idx_pair
+    idx_sent = idx_sent_corpus[i]
+
+    if (not idx_sent) or (not idx_1 in idx_sent) or (not idx_2 in idx_sent):
+        return
+
+    write_i = 0
+    match_flag = False
+    for read_i in range(len(idx_sent)):
+        cur_idx = idx_sent[read_i]
+        if match_flag:
+            if cur_idx == idx_2:
+                idx_sent[write_i] = repl_idx
+
+                # update count_map:
+                if write_i > 0:
+                    prev_idx = idx_sent[write_i - 1]
+                    rem_key = (prev_idx, idx_1)
+                    count_map[rem_key] = count_map.get(rem_key, 0) - 1
+                    add_key = (prev_idx, repl_idx)
+                    count_map[add_key] = count_map.get(add_key, 0) + 1
+
+                if read_i < len(idx_sent) - 1:
+                    next_idx = idx_sent[read_i + 1]
+                    rem_key = (idx_2, next_idx)
+                    count_map[rem_key] = count_map.get(rem_key, 0) - 1
+                    add_key = (repl_idx, next_idx)
+                    count_map[add_key] = count_map.get(add_key, 0) + 1
+                count_map[idx_pair] = count_map.get(idx_pair, 0) - 1
+                write_i += 1
+                match_flag = False
+            elif cur_idx == idx_1:
+                idx_sent[write_i] = idx_1
+                write_i += 1
+            else:
+                idx_sent[write_i] = idx_1
+                idx_sent[write_i + 1] = cur_idx
+                write_i += 2
+                match_flag = False
+
+        elif cur_idx == idx_1:
+            match_flag = True
+        else:
+            idx_sent[write_i] = cur_idx
+            write_i += 1
+    if match_flag:
+        idx_sent[write_i] = idx_1
+        write_i += 1
+
+    del idx_sent[write_i:]
+
+
+BYTE_UB = 256
+
+
+def diff_pair_count_maps(
+    got: dict[tuple[int, int], int] | Counter[tuple[int, int]],
+    want: dict[tuple[int, int], int] | Counter[tuple[int, int]],
+    idx_vocab_map: dict[int, bytes],
+    *,
+    label: str = "got vs want",
+    limit: int | None = 20,
+) -> list[tuple[tuple[bytes, bytes], int, int, int]]:
+    """Print pair-count differences between two maps keyed by token-id pairs.
+
+    Returns a list of (bytes_pair, got_count, want_count, delta) for each mismatch.
+    """
+    all_pairs = set(got) | set(want)
+    mismatches = []
+    for pair in all_pairs:
+        got_count = got.get(pair, 0)
+        want_count = want.get(pair, 0)
+        if got_count != want_count:
+            bpair = (idx_vocab_map[pair[0]], idx_vocab_map[pair[1]])
+            mismatches.append((bpair, got_count, want_count, got_count - want_count))
+
+    mismatches.sort(key=lambda row: (abs(row[3]), row[0]), reverse=True)
+
+    print(f"pair count diff ({label}): {len(mismatches)} mismatches")
+    for bpair, got_count, want_count, delta in mismatches[:limit]:
+        print(f"  {bpair!r}: got={got_count}, want={want_count}, delta={delta:+d}")
+    if limit is not None and len(mismatches) > limit:
+        print(f"  ... {len(mismatches) - limit} more")
+
+    return mismatches
+
+
+@dataclass(order=False, slots=True)
+class MergeCandidate:
+    count: int
+    pair: tuple[int, int]
+    vpair: tuple[bytes, bytes]
+
+    def __lt__(self, other: MergeCandidate) -> bool:
+        if self.count != other.count:
+            return self.count > other.count  # higher count pops first
+        return self.vpair > other.vpair  # tie: lex-greater pair pops first
+
+
 def run_train_bpe(
     input_path: str | os.PathLike,
     vocab_size: int,
@@ -591,4 +777,108 @@ def run_train_bpe(
                 representing that <token1> was merged with <token2>.
                 Merges are ordered by order of creation.
     """
-    return bpe.run_train_bpe(input_path, vocab_size, special_tokens, **kwargs)
+    num_processes = 8
+    special_token_bytestrs = set([token.encode("utf-8") for token in special_tokens])
+    with open(input_path, "rb") as f:
+        boundaries = list(find_chunk_boundaries(f, num_processes, special_tokens[0].encode("utf-8")))
+
+    bp_count_map = {}
+    with mp.Pool(processes=num_processes) as p:
+        res_list = p.starmap(
+            process_chunk,
+            [(input_path, special_tokens, start, end) for start, end in pairwise(boundaries)],
+        )
+        # res_list = [process_chunk(input_path, special_tokens, 0, boundaries[-1])]
+
+    idx_sent_corpus = []
+    for bp_map, idx_sent_list in res_list:
+        for k, v in bp_map.items():
+            bp_count_map[k] = bp_count_map.get(k, 0) + v
+        idx_sent_corpus.extend(idx_sent_list)
+
+    vocab_idx_map = {bytes([i]): i for i in range(BYTE_UB)}
+    idx_vocab_map = {i: bytes([i]) for i in range(BYTE_UB)}
+    next_idx = BYTE_UB
+    pair_heap = [
+        MergeCandidate(count=count, vpair=(idx_vocab_map[pair[0]], idx_vocab_map[pair[1]]), pair=pair)
+        for pair, count in bp_count_map.items()
+    ]
+    heapq.heapify(pair_heap)
+    merges = []
+    while next_idx < vocab_size - len(special_tokens) and pair_heap:
+        while pair_heap:
+            mc = heapq.heappop(pair_heap)
+            actual_count = bp_count_map.get(mc.pair, 0)
+            if actual_count > 0 and actual_count == mc.count:
+                break
+        else:
+            break
+
+        idx_1, idx_2 = mc.pair
+        vocab_1, vocab_2 = (idx_vocab_map[idx_1], idx_vocab_map[idx_2])
+        new_vocab = vocab_1 + vocab_2
+
+        assert new_vocab not in special_token_bytestrs
+        if new_vocab in special_token_bytestrs:
+            continue
+        merges.append((vocab_1, vocab_2))
+        # import pdb
+
+        # pdb.set_trace()
+
+        vocab_idx_map[new_vocab] = next_idx
+        idx_vocab_map[next_idx] = new_vocab
+
+        # update_res_list = p.starmap(
+        #     update_and_count_idx_sent_list,
+        #     [(mc.pair, idx_sent_list) for idx_sent_list in bytestr_corpus],
+        # )
+        # old_debug_ct = Counter([pair for idx_sent in idx_sent_corpus for pair in pairwise(idx_sent)])
+        agg_ct_map = {}
+        for i in range(len(idx_sent_corpus)):
+            update_and_count_idx_sent_list(mc.pair, next_idx, i, agg_ct_map, idx_sent_corpus)
+        # idx_sent_corpus, ct_maps = zip(*update_res_list)
+        # idx_sent_corpus = list(idx_sent_corpus)
+
+        # agg_ct_map[(idx_1, idx_2)] = -1 * bp_count_map[(idx_1, idx_2)]
+        # agg_ct_map = {k: v for k, v in agg_ct_map.items() if v != 0}
+
+        # new_debug_ct = Counter([pair for idx_sent in idx_sent_corpus for pair in pairwise(idx_sent)])
+        # new_debug_ct.update(Counter({k: -1 * v for k, v in old_debug_ct.items()}))
+        # new_debug_ct = Counter({k: v for k, v in new_debug_ct.items() if v != 0})
+
+        # print(f"vocab pair: {vocab_1}, {vocab_2}")
+        # assert new_debug_ct == agg_ct_map, (
+        #     f"merge idx: {next_idx - BYTE_UB}",
+        #     diff_pair_count_maps(got=agg_ct_map, want=new_debug_ct, idx_vocab_map=idx_vocab_map, limit=None),
+        # )
+
+        for pair, delta in agg_ct_map.items():
+            if delta != 0:
+                bp_count_map[pair] = bp_count_map.get(pair, 0) + delta
+                assert bp_count_map[pair] >= 0
+                if bp_count_map[pair] == 0:
+                    del bp_count_map[pair]
+                else:
+                    heapq.heappush(
+                        pair_heap,
+                        MergeCandidate(
+                            pair=pair,
+                            vpair=(idx_vocab_map[pair[0]], idx_vocab_map[pair[1]]),
+                            count=bp_count_map[pair],
+                        ),
+                    )
+
+        next_idx += 1
+        # after each merge, temporarily:
+        # best = max(bp_count_map.items(), key=lambda kv: (kv[1], (idx_vocab_map[kv[0][0]], idx_vocab_map[kv[0][1]])))
+        # popped = mc.pair  # what heap picked
+        # if best[0] != popped:
+        #     print(f"drift at merge {len(merges)}: heap={popped} actual_best={best[0]}")
+
+    idx_vocab_map = {
+        **idx_vocab_map,
+        **{vocab_size - 1 - i: st.encode("utf-8") for i, st in enumerate(special_tokens[::-1])},
+    }
+    # print(idx_vocab_map)
+    return idx_vocab_map, merges
