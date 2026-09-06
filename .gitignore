@@ -1,3 +1,6 @@
+artifacts/
+data/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -161,3 +164,7 @@ cython_debug/
 
 .ruff_cache/
 *.zip
+
+.DS_Store
+.chunkhound/
+.python-version

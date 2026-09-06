@@ -626,22 +626,23 @@ def process_chunk(input_path, special_tokens: list[str], start: int, end: int):
         split_chunks = re.split("|".join([re.escape(st) for st in special_tokens]), chunk)
 
         bp_map = {}
-        idx_sent_list = []
+        pretoken_map = {}
         for split_chunk in split_chunks:
             for match in re.finditer(_PAT, split_chunk):
                 pretoken = match.group(0)
-                bytestr = pretoken.encode("utf-8")
-                idx_sent = []
-                for i in range(len(bytestr) - 1):
-                    cur_idx = bytestr[i]
-                    next_idx = bytestr[i + 1]
-                    pair = (cur_idx, next_idx)
-                    bp_map[pair] = bp_map.get(pair, 0) + 1
-                    idx_sent.append(cur_idx)
-                idx_sent.append(bytestr[-1])
-                idx_sent_list.append(idx_sent)
-
-        return bp_map, idx_sent_list
+                if pretoken in pretoken_map:
+                    bytestr, prev_ct = pretoken_map[pretoken]
+                    pretoken_map[pretoken][1] = prev_ct + 1
+                else:
+                    bytestr = pretoken.encode("utf-8")
+                    pretoken_map[pretoken] = [list(bytestr), 1]
+        for pretoken, [bytestr, ct] in pretoken_map.items():
+            for i in range(len(bytestr) - 1):
+                cur_idx = bytestr[i]
+                next_idx = bytestr[i + 1]
+                pair = (cur_idx, next_idx)
+                bp_map[pair] = bp_map.get(pair, 0) + ct
+    return bp_map, pretoken_map
 
 
 def update_and_count_idx_sent_list(
@@ -649,10 +650,10 @@ def update_and_count_idx_sent_list(
     repl_idx: int,
     i: int,
     count_map: dict[tuple[int, int], int],
-    idx_sent_corpus: list[list[int]],
+    idx_sent_corpus: list[tuple[list[int], int]],
 ) -> None:
     idx_1, idx_2 = idx_pair
-    idx_sent = idx_sent_corpus[i]
+    [idx_sent, occurences] = idx_sent_corpus[i]
 
     if (not idx_sent) or (not idx_1 in idx_sent) or (not idx_2 in idx_sent):
         return
@@ -669,17 +670,17 @@ def update_and_count_idx_sent_list(
                 if write_i > 0:
                     prev_idx = idx_sent[write_i - 1]
                     rem_key = (prev_idx, idx_1)
-                    count_map[rem_key] = count_map.get(rem_key, 0) - 1
+                    count_map[rem_key] = count_map.get(rem_key, 0) - occurences
                     add_key = (prev_idx, repl_idx)
-                    count_map[add_key] = count_map.get(add_key, 0) + 1
+                    count_map[add_key] = count_map.get(add_key, 0) + occurences
 
                 if read_i < len(idx_sent) - 1:
                     next_idx = idx_sent[read_i + 1]
                     rem_key = (idx_2, next_idx)
-                    count_map[rem_key] = count_map.get(rem_key, 0) - 1
+                    count_map[rem_key] = count_map.get(rem_key, 0) - occurences
                     add_key = (repl_idx, next_idx)
-                    count_map[add_key] = count_map.get(add_key, 0) + 1
-                count_map[idx_pair] = count_map.get(idx_pair, 0) - 1
+                    count_map[add_key] = count_map.get(add_key, 0) + occurences
+                count_map[idx_pair] = count_map.get(idx_pair, 0) - occurences
                 write_i += 1
                 match_flag = False
             elif cur_idx == idx_1:
@@ -750,6 +751,10 @@ class MergeCandidate:
         return self.vpair > other.vpair  # tie: lex-greater pair pops first
 
 
+def _process_chunk(args):
+    return process_chunk(*args)
+
+
 def run_train_bpe(
     input_path: str | os.PathLike,
     vocab_size: int,
@@ -783,19 +788,22 @@ def run_train_bpe(
         boundaries = list(find_chunk_boundaries(f, num_processes, special_tokens[0].encode("utf-8")))
 
     bp_count_map = {}
+    pretoken_agg_map = {}
     with mp.Pool(processes=num_processes) as p:
-        res_list = p.starmap(
-            process_chunk,
+        for bp_map, pretoken_map in p.imap_unordered(
+            _process_chunk,
             [(input_path, special_tokens, start, end) for start, end in pairwise(boundaries)],
-        )
+        ):
+            for k, v in bp_map.items():
+                bp_count_map[k] = bp_count_map.get(k, 0) + v
+            for pretoken, [bytestr, ct] in pretoken_map.items():
+                if pretoken in pretoken_agg_map:
+                    pretoken_agg_map[pretoken][1] += ct
+                else:
+                    pretoken_agg_map[pretoken] = [bytestr, ct]
         # res_list = [process_chunk(input_path, special_tokens, 0, boundaries[-1])]
 
-    idx_sent_corpus = []
-    for bp_map, idx_sent_list in res_list:
-        for k, v in bp_map.items():
-            bp_count_map[k] = bp_count_map.get(k, 0) + v
-        idx_sent_corpus.extend(idx_sent_list)
-
+    idx_sent_corpus = list(pretoken_agg_map.values())
     vocab_idx_map = {bytes([i]): i for i in range(BYTE_UB)}
     idx_vocab_map = {i: bytes([i]) for i in range(BYTE_UB)}
     next_idx = BYTE_UB
