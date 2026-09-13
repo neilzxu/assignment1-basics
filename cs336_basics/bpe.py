@@ -801,7 +801,6 @@ def run_train_bpe(
                     pretoken_agg_map[pretoken][1] += ct
                 else:
                     pretoken_agg_map[pretoken] = [bytestr, ct]
-        # res_list = [process_chunk(input_path, special_tokens, 0, boundaries[-1])]
 
     idx_sent_corpus = list(pretoken_agg_map.values())
     vocab_idx_map = {bytes([i]): i for i in range(BYTE_UB)}
@@ -830,37 +829,13 @@ def run_train_bpe(
         if new_vocab in special_token_bytestrs:
             continue
         merges.append((vocab_1, vocab_2))
-        # import pdb
-
-        # pdb.set_trace()
 
         vocab_idx_map[new_vocab] = next_idx
         idx_vocab_map[next_idx] = new_vocab
 
-        # update_res_list = p.starmap(
-        #     update_and_count_idx_sent_list,
-        #     [(mc.pair, idx_sent_list) for idx_sent_list in bytestr_corpus],
-        # )
-        # old_debug_ct = Counter([pair for idx_sent in idx_sent_corpus for pair in pairwise(idx_sent)])
         agg_ct_map = {}
         for i in range(len(idx_sent_corpus)):
             update_and_count_idx_sent_list(mc.pair, next_idx, i, agg_ct_map, idx_sent_corpus)
-        # idx_sent_corpus, ct_maps = zip(*update_res_list)
-        # idx_sent_corpus = list(idx_sent_corpus)
-
-        # agg_ct_map[(idx_1, idx_2)] = -1 * bp_count_map[(idx_1, idx_2)]
-        # agg_ct_map = {k: v for k, v in agg_ct_map.items() if v != 0}
-
-        # new_debug_ct = Counter([pair for idx_sent in idx_sent_corpus for pair in pairwise(idx_sent)])
-        # new_debug_ct.update(Counter({k: -1 * v for k, v in old_debug_ct.items()}))
-        # new_debug_ct = Counter({k: v for k, v in new_debug_ct.items() if v != 0})
-
-        # print(f"vocab pair: {vocab_1}, {vocab_2}")
-        # assert new_debug_ct == agg_ct_map, (
-        #     f"merge idx: {next_idx - BYTE_UB}",
-        #     diff_pair_count_maps(got=agg_ct_map, want=new_debug_ct, idx_vocab_map=idx_vocab_map, limit=None),
-        # )
-
         for pair, delta in agg_ct_map.items():
             if delta != 0:
                 bp_count_map[pair] = bp_count_map.get(pair, 0) + delta
@@ -878,15 +853,48 @@ def run_train_bpe(
                     )
 
         next_idx += 1
-        # after each merge, temporarily:
-        # best = max(bp_count_map.items(), key=lambda kv: (kv[1], (idx_vocab_map[kv[0][0]], idx_vocab_map[kv[0][1]])))
-        # popped = mc.pair  # what heap picked
-        # if best[0] != popped:
-        #     print(f"drift at merge {len(merges)}: heap={popped} actual_best={best[0]}")
 
     idx_vocab_map = {
         **idx_vocab_map,
         **{vocab_size - 1 - i: st.encode("utf-8") for i, st in enumerate(special_tokens[::-1])},
     }
-    # print(idx_vocab_map)
     return idx_vocab_map, merges
+
+
+def encode_pretoken(input_path, special_tokens: list[str], start: int, end: int):
+    """Process a chunk of text into a map of counts of pairs of bytes"""
+    with open(input_path, "rb") as f:
+        f.seek(start)
+        chunk = f.read(end - start).decode("utf-8", errors="ignore")
+        split_chunks = re.split("(" + "|".join([re.escape(st) for st in special_tokens]) + ")", chunk)
+
+        bp_map = {}
+        pretoken_map = {}
+        for split_chunk in split_chunks:
+            for match in re.finditer(_PAT, split_chunk):
+                pretoken = match.group(0)
+                if pretoken in pretoken_map:
+                    bytestr, prev_ct = pretoken_map[pretoken]
+                    pretoken_map[pretoken][1] = prev_ct + 1
+                else:
+                    bytestr = pretoken.encode("utf-8")
+                    pretoken_map[pretoken] = [list(bytestr), 1]
+        for pretoken, [bytestr, ct] in pretoken_map.items():
+            for i in range(len(bytestr) - 1):
+                cur_idx = bytestr[i]
+                next_idx = bytestr[i + 1]
+                pair = (cur_idx, next_idx)
+                bp_map[pair] = bp_map.get(pair, 0) + ct
+    return bp_map, pretoken_map
+
+
+def bpe_encode(
+    input_path: str | os.PathLike, idx_vocab_map: dict[int, bytes], merges: list[tuple[bytes, bytes]]
+) -> list[int]:
+    """
+    Encodes a text file into tokens using the given vocab and merge list derived from BPE training.
+
+    """
+    special_token_bytestrs = set([token.encode("utf-8") for token in special_tokens])
+    with open(input_path, "rb") as f:
+        boundaries = list(find_chunk_boundaries(f, num_processes, special_tokens[0].encode("utf-8")))

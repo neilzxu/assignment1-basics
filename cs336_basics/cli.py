@@ -53,7 +53,37 @@ def cmd_train_bpe_tinystories(_args: argparse.Namespace) -> None:
 
 def cmd_train_bpe_owt(_args: argparse.Namespace) -> None:
     """Train a BPE tokenizer on OpenWebText and serialize vocab/merges."""
-    raise NotImplementedError
+    (vocab, merges), stats = run_with_stats(
+        lambda: bpe.run_train_bpe(
+            "data/owt_train.txt",
+            vocab_size=32_000,
+            special_tokens=["<|endoftext|>"],
+        )
+    )
+    _print_run_stats("train-bpe-owt", stats)
+
+    longest_token = max(vocab.values(), key=len)
+    print(f"longest token ({len(longest_token)} bytes): {longest_token!r}")
+
+    os.makedirs("artifacts", exist_ok=True)
+    vocab_json = {i: token.decode("latin-1") for i, token in vocab.items()}
+    with open("artifacts/owt_vocab.json", "w") as f:
+        json.dump(vocab_json, f, indent=2)
+    with open("artifacts/owt_merges.txt", "w") as f:
+        f.writelines(f"{a.decode('latin-1')} {b.decode('latin-1')}\n" for a, b in merges)
+    with open("artifacts/owt_train_stats.json", "w") as f:
+        json.dump(
+            {
+                "elapsed_s": stats.elapsed_s,
+                "peak_rss_bytes": stats.peak_rss_bytes,
+                "longest_token_bytes": len(longest_token),
+                "longest_token": longest_token.decode("latin-1"),
+                "vocab_size": len(vocab),
+                "num_merges": len(merges),
+            },
+            f,
+            indent=2,
+        )
 
 
 def cmd_profile_merge(_args: argparse.Namespace) -> None:
