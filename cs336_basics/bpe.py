@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import heapq
+import json
 import multiprocessing as mp
 import os
 from collections import Counter
@@ -861,40 +862,131 @@ def run_train_bpe(
     return idx_vocab_map, merges
 
 
-def encode_pretoken(input_path, special_tokens: list[str], start: int, end: int):
+def _decr_del(rem_key: tuple[int, int], tid_pair_ct_map: dict[tuple[int, int], int]) -> None:
+    tid_pair_ct_map[rem_key] = tid_pair_ct_map.get(rem_key, 0) - 1
+    if tid_pair_ct_map[rem_key] <= 0:
+        del tid_pair_ct_map[rem_key]
+
+
+def apply_merge(
+    tid_pair: tuple[int, int], repl_tid: int, tid_list: list[int], tid_pair_ct_map: dict[tuple[int, int], int]
+) -> None:
+    tid_1, tid_2 = tid_pair
+    write_i = 0
+    match_flag = False
+    for read_i in range(len(tid_list)):
+        cur_idx = tid_list[read_i]
+        if match_flag:
+            if cur_idx == tid_2:
+                tid_list[write_i] = repl_tid
+
+                if write_i > 0:
+                    prev_idx = tid_list[write_i - 1]
+                    rem_key = (prev_idx, tid_1)
+                    _decr_del(rem_key, tid_pair_ct_map)
+                    add_key = (prev_idx, repl_tid)
+                    tid_pair_ct_map[add_key] = tid_pair_ct_map.get(add_key, 0) + 1
+
+                if read_i < len(tid_list) - 1:
+                    next_idx = tid_list[read_i + 1]
+                    rem_key = (tid_2, next_idx)
+                    _decr_del(rem_key, tid_pair_ct_map)
+                    add_key = (repl_tid, next_idx)
+                    tid_pair_ct_map[add_key] = tid_pair_ct_map.get(add_key, 0) + 1
+                _decr_del(tid_pair, tid_pair_ct_map)
+                write_i += 1
+                match_flag = False
+            elif cur_idx == tid_1:
+                tid_list[write_i] = tid_1
+                write_i += 1
+            else:
+                tid_list[write_i] = tid_1
+                tid_list[write_i + 1] = cur_idx
+                write_i += 2
+                match_flag = False
+
+        elif cur_idx == tid_1:
+            match_flag = True
+        else:
+            tid_list[write_i] = cur_idx
+            write_i += 1
+    if match_flag:
+        tid_list[write_i] = tid_1
+        write_i += 1
+
+    del tid_list[write_i:]
+
+
+def _encode_pretoken(pretoken, vocab_idx_map, merges, cache):
+    if pretoken in cache:
+        return cache[pretoken]
+    tid_list = [vocab_idx_map[bytes([x])] for x in pretoken.encode("utf-8")]
+    tid_pair_ct_map = Counter(pairwise(tid_list))
+
+    for bytestr_1, bytestr_2 in merges:
+        tid_pair = (vocab_idx_map[bytestr_1], vocab_idx_map[bytestr_2])
+        repl_tid = vocab_idx_map[bytestr_1 + bytestr_2]
+        apply_merge(tid_pair=tid_pair, repl_tid=repl_tid, tid_list=tid_list, tid_pair_ct_map=tid_pair_ct_map)
+    cache[pretoken] = tid_list
+    return tid_list
+
+
+def _encode_text(text, sorted_special_tokens: list[str] | None, vocab_idx_map, merges):
     """Process a chunk of text into a map of counts of pairs of bytes"""
-    with open(input_path, "rb") as f:
-        f.seek(start)
-        chunk = f.read(end - start).decode("utf-8", errors="ignore")
-        split_chunks = re.split("(" + "|".join([re.escape(st) for st in special_tokens]) + ")", chunk)
+    tids = []
+    cache = {}
+    if sorted_special_tokens is None or not sorted_special_tokens:
+        for match in re.finditer(_PAT, text):
+            pretoken = match.group()
+            tids.extend(_encode_pretoken(pretoken, vocab_idx_map, merges, cache))
+    else:
+        special_re = re.compile("|".join([re.escape(st) for st in sorted_special_tokens]))
+        cursor = 0
+        for special in special_re.finditer(text):
+            special_token = special.group()
+            for match in re.finditer(_PAT, text, pos=cursor, endpos=special.start()):
+                pretoken = match.group()
+                tid_list = _encode_pretoken(pretoken, vocab_idx_map, merges, cache)
+                tids.extend(list(tid_list))
+            tids.append(vocab_idx_map[special_token.encode("utf-8")])
+            cursor = special.end()
+        for match in re.finditer(_PAT, text, pos=cursor):
+            pretoken = match.group()
+            tid_list = _encode_pretoken(pretoken, vocab_idx_map, merges, cache)
+            tids.extend(tid_list)
+    return tids
 
-        bp_map = {}
-        pretoken_map = {}
-        for split_chunk in split_chunks:
-            for match in re.finditer(_PAT, split_chunk):
-                pretoken = match.group(0)
-                if pretoken in pretoken_map:
-                    bytestr, prev_ct = pretoken_map[pretoken]
-                    pretoken_map[pretoken][1] = prev_ct + 1
-                else:
-                    bytestr = pretoken.encode("utf-8")
-                    pretoken_map[pretoken] = [list(bytestr), 1]
-        for pretoken, [bytestr, ct] in pretoken_map.items():
-            for i in range(len(bytestr) - 1):
-                cur_idx = bytestr[i]
-                next_idx = bytestr[i + 1]
-                pair = (cur_idx, next_idx)
-                bp_map[pair] = bp_map.get(pair, 0) + ct
-    return bp_map, pretoken_map
 
+@dataclass
+class Tokenizer:
+    vocab: dict[int, bytes]
+    merges: list[tuple[bytes, bytes]]
+    special_tokens: list[str] | None = None
 
-def bpe_encode(
-    input_path: str | os.PathLike, idx_vocab_map: dict[int, bytes], merges: list[tuple[bytes, bytes]]
-) -> list[int]:
-    """
-    Encodes a text file into tokens using the given vocab and merge list derived from BPE training.
+    def __post_init__(self):
+        self._vocab_idx_map = {v: k for k, v in self.vocab.items()}
+        if not self.special_tokens is None:
+            self._sorted_special_tokens = sorted(self.special_tokens, key=len)[::-1]
+        else:
+            self._sorted_special_tokens = None
 
-    """
-    special_token_bytestrs = set([token.encode("utf-8") for token in special_tokens])
-    with open(input_path, "rb") as f:
-        boundaries = list(find_chunk_boundaries(f, num_processes, special_tokens[0].encode("utf-8")))
+    @classmethod
+    def from_files(cls, vocab_filepath: str, merges_filepath: str, special_tokens: list[str] | None = None):
+        with open(vocab_filepath) as in_f:
+            idx_vocab_map = json.load(in_f)
+        with open(merges_filepath) as in_f:
+            merges = json.load(in_f)
+        vocab_idx_map = {int(k): v.encode("latin-1") for k, v in idx_vocab_map.items()}
+        merges_bytestrs = [(a.encode("latin-1"), b.encode("latin-1")) for a, b in merges]
+        return cls(vocab_idx_map, merges_bytestrs, special_tokens)
+
+    def encode(self, text: str) -> list[int]:
+        return _encode_text(text, self._sorted_special_tokens, self._vocab_idx_map, self.merges)
+
+    def encode_iterable(self, iterable: Iterable[str]) -> Iterable[int]:
+        for text in iterable:
+            yield from self.encode(text)
+
+    def decode(self, ids: list[int]) -> str:
+        joined_bytes = b"".join(self.vocab[id] for id in ids)
+        return (joined_bytes).decode("utf-8", errors="replace")

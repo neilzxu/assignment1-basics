@@ -34,8 +34,9 @@ def cmd_train_bpe_tinystories(_args: argparse.Namespace) -> None:
     vocab_json = {i: token.decode("latin-1") for i, token in vocab.items()}
     with open("artifacts/tinystories_vocab.json", "w") as f:
         json.dump(vocab_json, f, indent=2)
-    with open("artifacts/tinystories_merges.txt", "w") as f:
-        f.writelines(f"{a.decode('latin-1')} {b.decode('latin-1')}\n" for a, b in merges)
+    merge_json = [(a.decode("latin-1"), b.decode("latin-1")) for a, b in merges]
+    with open("artifacts/tinystories_merges.json", "w") as f:
+        json.dump(merge_json, f, indent=2)
     with open("artifacts/tinystories_train_stats.json", "w") as f:
         json.dump(
             {
