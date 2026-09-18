@@ -760,6 +760,7 @@ def run_train_bpe(
     input_path: str | os.PathLike,
     vocab_size: int,
     special_tokens: list[str],
+    num_processes: int = 8,
     **kwargs,
 ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
     """Given the path to an input corpus, run train a BPE tokenizer and
@@ -783,7 +784,6 @@ def run_train_bpe(
                 representing that <token1> was merged with <token2>.
                 Merges are ordered by order of creation.
     """
-    num_processes = 8
     special_token_bytestrs = set([token.encode("utf-8") for token in special_tokens])
     with open(input_path, "rb") as f:
         boundaries = list(find_chunk_boundaries(f, num_processes, special_tokens[0].encode("utf-8")))
