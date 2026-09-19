@@ -646,6 +646,18 @@ def process_chunk(input_path, special_tokens: list[str], start: int, end: int):
     return bp_map, pretoken_map
 
 
+def _decr_del(
+    rem_key: tuple[int, int], tid_pair_ct_map: dict[tuple[int, int], int], occurences: int = 1, rem_neg=True
+) -> None:
+    tid_pair_ct_map[rem_key] = tid_pair_ct_map.get(rem_key, 0) - occurences
+    if tid_pair_ct_map[rem_key] <= 0 and rem_neg:
+        del tid_pair_ct_map[rem_key]
+
+
+def _incr(add_key: tuple[int, int], tid_pair_ct_map: dict[tuple[int, int], int], occurences: int = 1):
+    tid_pair_ct_map[add_key] = tid_pair_ct_map.get(add_key, 0) + occurences
+
+
 def update_and_count_idx_sent_list(
     idx_pair: tuple[int, int],
     repl_idx: int,
@@ -654,9 +666,9 @@ def update_and_count_idx_sent_list(
     idx_sent_corpus: list[tuple[list[int], int]],
 ) -> None:
     idx_1, idx_2 = idx_pair
-    [idx_sent, occurences] = idx_sent_corpus[i]
 
-    if (not idx_sent) or (not idx_1 in idx_sent) or (not idx_2 in idx_sent):
+    [idx_sent, occurences, sent_count_map] = idx_sent_corpus[i]
+    if (idx_1, idx_2) not in sent_count_map:
         return
 
     write_i = 0
@@ -671,17 +683,22 @@ def update_and_count_idx_sent_list(
                 if write_i > 0:
                     prev_idx = idx_sent[write_i - 1]
                     rem_key = (prev_idx, idx_1)
-                    count_map[rem_key] = count_map.get(rem_key, 0) - occurences
+                    _decr_del(rem_key, count_map, occurences, rem_neg=False)
+                    _decr_del(rem_key, sent_count_map)
                     add_key = (prev_idx, repl_idx)
-                    count_map[add_key] = count_map.get(add_key, 0) + occurences
+                    _incr(add_key, count_map, occurences)
+                    _incr(add_key, sent_count_map)
 
                 if read_i < len(idx_sent) - 1:
                     next_idx = idx_sent[read_i + 1]
                     rem_key = (idx_2, next_idx)
-                    count_map[rem_key] = count_map.get(rem_key, 0) - occurences
+                    _decr_del(rem_key, count_map, occurences, rem_neg=False)
+                    _decr_del(rem_key, sent_count_map)
                     add_key = (repl_idx, next_idx)
-                    count_map[add_key] = count_map.get(add_key, 0) + occurences
-                count_map[idx_pair] = count_map.get(idx_pair, 0) - occurences
+                    _incr(add_key, count_map, occurences)
+                    _incr(add_key, sent_count_map)
+                _decr_del(idx_pair, count_map, occurences, rem_neg=False)
+                _decr_del(idx_pair, sent_count_map)
                 write_i += 1
                 match_flag = False
             elif cur_idx == idx_1:
@@ -760,7 +777,7 @@ def run_train_bpe(
     input_path: str | os.PathLike,
     vocab_size: int,
     special_tokens: list[str],
-    num_processes: int = 8,
+    num_processes: int = 12,
     **kwargs,
 ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
     """Given the path to an input corpus, run train a BPE tokenizer and
@@ -801,7 +818,7 @@ def run_train_bpe(
                 if pretoken in pretoken_agg_map:
                     pretoken_agg_map[pretoken][1] += ct
                 else:
-                    pretoken_agg_map[pretoken] = [bytestr, ct]
+                    pretoken_agg_map[pretoken] = [bytestr, ct, Counter(pairwise(bytestr))]
 
     idx_sent_corpus = list(pretoken_agg_map.values())
     vocab_idx_map = {bytes([i]): i for i in range(BYTE_UB)}
@@ -860,12 +877,6 @@ def run_train_bpe(
         **{vocab_size - 1 - i: st.encode("utf-8") for i, st in enumerate(special_tokens[::-1])},
     }
     return idx_vocab_map, merges
-
-
-def _decr_del(rem_key: tuple[int, int], tid_pair_ct_map: dict[tuple[int, int], int]) -> None:
-    tid_pair_ct_map[rem_key] = tid_pair_ct_map.get(rem_key, 0) - 1
-    if tid_pair_ct_map[rem_key] <= 0:
-        del tid_pair_ct_map[rem_key]
 
 
 def apply_merge(
