@@ -672,8 +672,6 @@ def update_and_count_idx_sent_list(
     idx_1, idx_2 = idx_pair
 
     [idx_sent, occurences, sent_count_map] = idx_sent_corpus[i]
-    if (idx_1, idx_2) not in sent_count_map:
-        return
 
     count_delta = {}
     write_i = 0
@@ -683,31 +681,20 @@ def update_and_count_idx_sent_list(
         if match_flag:
             if cur_idx == idx_2:
                 idx_sent[write_i] = repl_idx
-
                 # update count_map:
                 if write_i > 0:
                     prev_idx = idx_sent[write_i - 1]
                     rem_key = (prev_idx, idx_1)
                     count_delta[rem_key] = count_delta.get(rem_key, 0) - 1
-                    # _decr_del(rem_key, count_map, occurences, rem_neg=False)
-                    # _decr_del(rem_key, sent_count_map)
                     add_key = (prev_idx, repl_idx)
                     count_delta[add_key] = count_delta.get(add_key, 0) + 1
-                    # _incr(add_key, count_map, occurences)
-                    # _incr(add_key, sent_count_map)
 
                 if read_i < len(idx_sent) - 1:
                     next_idx = idx_sent[read_i + 1]
                     rem_key = (idx_2, next_idx)
                     count_delta[rem_key] = count_delta.get(rem_key, 0) - 1
-                    # _decr_del(rem_key, count_map, occurences, rem_neg=False)
-                    # _decr_del(rem_key, sent_count_map)
                     add_key = (repl_idx, next_idx)
                     count_delta[add_key] = count_delta.get(add_key, 0) + 1
-                    # _incr(add_key, count_map, occurences)
-                    # _incr(add_key, sent_count_map)
-                # _decr_del(idx_pair, count_map, occurences, rem_neg=False)
-                # _decr_del(idx_pair, sent_count_map)
                 count_delta[idx_pair] = count_delta.get(idx_pair, 0) - 1
                 write_i += 1
                 match_flag = False
