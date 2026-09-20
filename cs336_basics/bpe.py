@@ -890,7 +890,9 @@ def run_train_bpe(
         agg_ct_map = {}
         pair_i_delta = set()
         for i in pair_i_map[mc.pair]:
-            update_and_count_idx_sent_list(mc.pair, next_idx, i, agg_ct_map, pair_i_delta, idx_sent_corpus)
+            update_and_count_idx_sent_list(
+                mc.pair, vocab_idx_map[new_vocab], i, agg_ct_map, pair_i_delta, idx_sent_corpus
+            )
 
         for update_dir, pair, i in pair_i_delta:
             if update_dir:  # increment
