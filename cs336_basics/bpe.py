@@ -647,7 +647,10 @@ def process_chunk(input_path, special_tokens: list[str], start: int, end: int):
 
 
 def _decr_del(
-    rem_key: tuple[int, int], tid_pair_ct_map: dict[tuple[int, int], int], occurences: int = 1, rem_neg=True
+    rem_key: tuple[int, int],
+    tid_pair_ct_map: dict[tuple[int, int], int],
+    occurences: int = 1,
+    rem_neg=True,
 ) -> None:
     tid_pair_ct_map[rem_key] = tid_pair_ct_map.get(rem_key, 0) - occurences
     if tid_pair_ct_map[rem_key] <= 0 and rem_neg:
@@ -663,6 +666,7 @@ def update_and_count_idx_sent_list(
     repl_idx: int,
     i: int,
     count_map: dict[tuple[int, int], int],
+    pair_i_delta: set[tuple[bool, tuple[int, int], int]],
     idx_sent_corpus: list[tuple[list[int], int]],
 ) -> None:
     idx_1, idx_2 = idx_pair
@@ -671,6 +675,7 @@ def update_and_count_idx_sent_list(
     if (idx_1, idx_2) not in sent_count_map:
         return
 
+    count_delta = {}
     write_i = 0
     match_flag = False
     for read_i in range(len(idx_sent)):
@@ -683,22 +688,27 @@ def update_and_count_idx_sent_list(
                 if write_i > 0:
                     prev_idx = idx_sent[write_i - 1]
                     rem_key = (prev_idx, idx_1)
-                    _decr_del(rem_key, count_map, occurences, rem_neg=False)
-                    _decr_del(rem_key, sent_count_map)
+                    count_delta[rem_key] = count_delta.get(rem_key, 0) - 1
+                    # _decr_del(rem_key, count_map, occurences, rem_neg=False)
+                    # _decr_del(rem_key, sent_count_map)
                     add_key = (prev_idx, repl_idx)
-                    _incr(add_key, count_map, occurences)
-                    _incr(add_key, sent_count_map)
+                    count_delta[add_key] = count_delta.get(add_key, 0) + 1
+                    # _incr(add_key, count_map, occurences)
+                    # _incr(add_key, sent_count_map)
 
                 if read_i < len(idx_sent) - 1:
                     next_idx = idx_sent[read_i + 1]
                     rem_key = (idx_2, next_idx)
-                    _decr_del(rem_key, count_map, occurences, rem_neg=False)
-                    _decr_del(rem_key, sent_count_map)
+                    count_delta[rem_key] = count_delta.get(rem_key, 0) - 1
+                    # _decr_del(rem_key, count_map, occurences, rem_neg=False)
+                    # _decr_del(rem_key, sent_count_map)
                     add_key = (repl_idx, next_idx)
-                    _incr(add_key, count_map, occurences)
-                    _incr(add_key, sent_count_map)
-                _decr_del(idx_pair, count_map, occurences, rem_neg=False)
-                _decr_del(idx_pair, sent_count_map)
+                    count_delta[add_key] = count_delta.get(add_key, 0) + 1
+                    # _incr(add_key, count_map, occurences)
+                    # _incr(add_key, sent_count_map)
+                # _decr_del(idx_pair, count_map, occurences, rem_neg=False)
+                # _decr_del(idx_pair, sent_count_map)
+                count_delta[idx_pair] = count_delta.get(idx_pair, 0) - 1
                 write_i += 1
                 match_flag = False
             elif cur_idx == idx_1:
@@ -718,6 +728,16 @@ def update_and_count_idx_sent_list(
     if match_flag:
         idx_sent[write_i] = idx_1
         write_i += 1
+
+    # update based on delta
+    for pair, delta in count_delta.items():
+        count_map[pair] = count_map.get(pair, 0) + delta * occurences
+        if pair not in sent_count_map and delta > 0:
+            pair_i_delta.add((True, pair, i))
+        sent_count_map[pair] = sent_count_map.get(pair, 0) + delta
+        if sent_count_map[pair] <= 0:
+            del sent_count_map[pair]
+            pair_i_delta.add((False, pair, i))
 
     del idx_sent[write_i:]
 
@@ -807,6 +827,7 @@ def run_train_bpe(
 
     bp_count_map = {}
     pretoken_agg_map = {}
+
     with mp.Pool(processes=num_processes) as p:
         for bp_map, pretoken_map in p.imap_unordered(
             _process_chunk,
@@ -821,6 +842,13 @@ def run_train_bpe(
                     pretoken_agg_map[pretoken] = [bytestr, ct, Counter(pairwise(bytestr))]
 
     idx_sent_corpus = list(pretoken_agg_map.values())
+    pair_i_map = {}
+    for idx, [_, _, pair_count_map] in enumerate(idx_sent_corpus):
+        for pair in pair_count_map:
+            if pair not in pair_i_map:
+                pair_i_map[pair] = set()
+            pair_i_map[pair].add(idx)
+
     vocab_idx_map = {bytes([i]): i for i in range(BYTE_UB)}
     idx_vocab_map = {i: bytes([i]) for i in range(BYTE_UB)}
     next_idx = BYTE_UB
@@ -831,6 +859,13 @@ def run_train_bpe(
     heapq.heapify(pair_heap)
     merges = []
     while next_idx < vocab_size - len(special_tokens) and pair_heap:
+        # for pair, i_set in pair_i_map.items():
+        #     for i in i_set:
+        #         assert pair in idx_sent_corpus[i][2], (pair, i)
+        # for i, [_, _, sent_count_map] in enumerate(idx_sent_corpus):
+        #     for pair in sent_count_map:
+        #         assert i in pair_i_map[pair], (pair, i)
+
         while pair_heap:
             mc = heapq.heappop(pair_heap)
             actual_count = bp_count_map.get(mc.pair, 0)
@@ -848,12 +883,26 @@ def run_train_bpe(
             continue
         merges.append((vocab_1, vocab_2))
 
-        vocab_idx_map[new_vocab] = next_idx
-        idx_vocab_map[next_idx] = new_vocab
+        if new_vocab not in vocab_idx_map:
+            vocab_idx_map[new_vocab] = next_idx
+            idx_vocab_map[next_idx] = new_vocab
 
         agg_ct_map = {}
-        for i in range(len(idx_sent_corpus)):
-            update_and_count_idx_sent_list(mc.pair, next_idx, i, agg_ct_map, idx_sent_corpus)
+        pair_i_delta = set()
+        for i in pair_i_map[mc.pair]:
+            update_and_count_idx_sent_list(mc.pair, next_idx, i, agg_ct_map, pair_i_delta, idx_sent_corpus)
+
+        for update_dir, pair, i in pair_i_delta:
+            if update_dir:  # increment
+                if pair not in pair_i_map:
+                    pair_i_map[pair] = set()
+                pair_i_map[pair].add(i)
+            else:  # decrement
+                if pair in pair_i_map and i in pair_i_map[pair]:
+                    pair_i_map[pair].remove(i)
+                    if not pair_i_map[pair]:
+                        del pair_i_map[pair]
+
         for pair, delta in agg_ct_map.items():
             if delta != 0:
                 bp_count_map[pair] = bp_count_map.get(pair, 0) + delta
