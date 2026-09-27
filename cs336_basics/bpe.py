@@ -997,10 +997,9 @@ def _encode_pretoken(pretoken, vocab_idx_map, tid_pair_rank_map: dict[tuple[int,
 from tqdm import tqdm
 
 
-def _encode_text(text, sorted_special_tokens: list[str] | None, vocab_idx_map, tid_pair_rank_map):
+def _encode_text(text, sorted_special_tokens: list[str] | None, vocab_idx_map, tid_pair_rank_map, cache):
     """Process a chunk of text into a map of counts of pairs of bytes"""
     tids = []
-    cache = {}
     if sorted_special_tokens is None or not sorted_special_tokens:
         for match in re.finditer(_PAT, text):
             pretoken = match.group()
@@ -1040,6 +1039,7 @@ class Tokenizer:
             (self._vocab_idx_map[token_1], self._vocab_idx_map[token_2]): (rank, self._vocab_idx_map[token_1 + token_2])
             for rank, (token_1, token_2) in enumerate(self.merges)
         }
+        self._cache = {}
 
     @classmethod
     def from_files(cls, vocab_filepath: str, merges_filepath: str, special_tokens: list[str] | None = None):
@@ -1052,7 +1052,7 @@ class Tokenizer:
         return cls(vocab_idx_map, merges_bytestrs, special_tokens)
 
     def encode(self, text: str) -> list[int]:
-        return _encode_text(text, self._sorted_special_tokens, self._vocab_idx_map, self._tid_pair_rank_map)
+        return _encode_text(text, self._sorted_special_tokens, self._vocab_idx_map, self._tid_pair_rank_map, self._cache)
 
     def encode_iterable(self, iterable: Iterable[str]) -> Iterable[int]:
         for text in iterable:
