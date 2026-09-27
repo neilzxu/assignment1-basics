@@ -174,7 +174,9 @@ def _write_token_ids(
     text_path = Path(text_path)
     bin_path = text_path.with_suffix(".bin")
     npy_path = text_path.with_suffix(".npy")
-    token_ids = iter(tokenizer.encode_iterable(_iter_documents(text_path)))
+    # token_ids = iter(tokenizer.encode_iterable(_iter_documents(text_path)))
+    with open(text_path) as in_f:
+        token_ids = tokenizer.encode(in_f.read())
 
     token_count = 0
     with bin_path.open("wb") as out_file:

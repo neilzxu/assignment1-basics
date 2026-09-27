@@ -980,6 +980,9 @@ def _encode_pretoken(pretoken, vocab_idx_map, merges, cache):
     return tid_list
 
 
+from tqdm import tqdm
+
+
 def _encode_text(text, sorted_special_tokens: list[str] | None, vocab_idx_map, merges):
     """Process a chunk of text into a map of counts of pairs of bytes"""
     tids = []
@@ -991,7 +994,7 @@ def _encode_text(text, sorted_special_tokens: list[str] | None, vocab_idx_map, m
     else:
         special_re = re.compile("|".join([re.escape(st) for st in sorted_special_tokens]))
         cursor = 0
-        for special in special_re.finditer(text):
+        for special in tqdm(special_re.finditer(text), desc="EOT processed"):
             special_token = special.group()
             for match in re.finditer(_PAT, text, pos=cursor, endpos=special.start()):
                 pretoken = match.group()
