@@ -918,11 +918,12 @@ def run_train_bpe(
 
 
 def apply_merge(
-    tid_pair: tuple[int, int], repl_tid: int, tid_list: list[int], tid_pair_ct_map: dict[tuple[int, int], int]
-) -> None:
+    tid_pair: tuple[int, int], repl_tid: int, tid_list: list[int]
+) -> dict[tuple[int, int], int]:
     tid_1, tid_2 = tid_pair
     write_i = 0
     match_flag = False
+    delta_map = {}
     for read_i in range(len(tid_list)):
         cur_idx = tid_list[read_i]
         if match_flag:
@@ -932,17 +933,17 @@ def apply_merge(
                 if write_i > 0:
                     prev_idx = tid_list[write_i - 1]
                     rem_key = (prev_idx, tid_1)
-                    _decr_del(rem_key, tid_pair_ct_map)
+                    delta_map[rem_key] = delta_map.get(rem_key, 0) - 1
                     add_key = (prev_idx, repl_tid)
-                    tid_pair_ct_map[add_key] = tid_pair_ct_map.get(add_key, 0) + 1
+                    delta_map[add_key] = delta_map.get(add_key, 0) + 1
 
                 if read_i < len(tid_list) - 1:
                     next_idx = tid_list[read_i + 1]
                     rem_key = (tid_2, next_idx)
-                    _decr_del(rem_key, tid_pair_ct_map)
+                    delta_map[rem_key] = delta_map.get(rem_key, 0) - 1
                     add_key = (repl_tid, next_idx)
-                    tid_pair_ct_map[add_key] = tid_pair_ct_map.get(add_key, 0) + 1
-                _decr_del(tid_pair, tid_pair_ct_map)
+                    delta_map[add_key] = delta_map.get(add_key, 0) + 1
+                delta_map[tid_pair] = delta_map.get(tid_pair, 0) - 1
                 write_i += 1
                 match_flag = False
             elif cur_idx == tid_1:
@@ -964,18 +965,21 @@ def apply_merge(
         write_i += 1
 
     del tid_list[write_i:]
+    return delta_map
 
 
-def _encode_pretoken(pretoken, vocab_idx_map, merges, cache):
+def _encode_pretoken(pretoken, vocab_idx_map, tid_pair_merge_map, cache):
     if pretoken in cache:
         return cache[pretoken]
     tid_list = [vocab_idx_map[bytes([x])] for x in pretoken.encode("utf-8")]
     tid_pair_ct_map = Counter(pairwise(tid_list))
 
-    for bytestr_1, bytestr_2 in merges:
+    merge_order_tid_pair_heap = [(tid_pair_rank_map[pair][0], pair, tid_pair_rank_map[pair][1]) for pair in tid_pair_ct_map]
+    while heap:
+
         tid_pair = (vocab_idx_map[bytestr_1], vocab_idx_map[bytestr_2])
         repl_tid = vocab_idx_map[bytestr_1 + bytestr_2]
-        apply_merge(tid_pair=tid_pair, repl_tid=repl_tid, tid_list=tid_list, tid_pair_ct_map=tid_pair_ct_map)
+        delta_map = apply_merge(tid_pair=tid_pair, repl_tid=repl_tid, tid_list=tid_list)
     cache[pretoken] = tid_list
     return tid_list
 
