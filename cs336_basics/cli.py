@@ -6,7 +6,6 @@ import argparse
 import json
 import os
 from collections.abc import Sequence
-from itertools import islice
 from pathlib import Path
 
 import numpy as np
@@ -164,40 +163,17 @@ def _iter_documents(path, separator="<|endoftext|>", chunk_size=1024 * 1024):
 def _write_token_ids(
     tokenizer: bpe.Tokenizer,
     text_path: str | os.PathLike,
-    *,
-    chunk_size: int = 1_000_000,
 ) -> tuple[Path, Path, int]:
-    """Stream a text corpus to a raw binary file, then to a NumPy array file."""
-    if chunk_size <= 0:
-        raise ValueError("chunk_size must be positive")
-
+    """Tokenize a text corpus and write raw and NumPy token arrays."""
     text_path = Path(text_path)
     bin_path = text_path.with_suffix(".bin")
     npy_path = text_path.with_suffix(".npy")
-    # token_ids = iter(tokenizer.encode_iterable(_iter_documents(text_path)))
-    with open(text_path) as in_f:
-        token_ids = tokenizer.encode(in_f.read())
+    text = text_path.read_text(encoding="utf-8")
+    tokens = np.asarray(tokenizer.encode(text), dtype=np.uint16)
 
-    token_count = 0
-    with bin_path.open("wb") as out_file:
-        while True:
-            token_chunk = np.fromiter(islice(token_ids, chunk_size), dtype=np.uint16)
-            if token_chunk.size == 0:
-                break
-            token_chunk.tofile(out_file)
-            token_count += token_chunk.size
-
-    # A .bin file has no dtype or shape metadata. Convert it to a standard .npy
-    # file in chunks so the entire corpus is never held in memory.
-    numpy_tokens = np.lib.format.open_memmap(npy_path, mode="w+", dtype=np.uint16, shape=(token_count,))
-    if token_count:
-        raw_tokens = np.memmap(bin_path, dtype=np.uint16, mode="r", shape=(token_count,))
-        for start in range(0, token_count, chunk_size):
-            stop = min(start + chunk_size, token_count)
-            numpy_tokens[start:stop] = raw_tokens[start:stop]
-        del raw_tokens
-    numpy_tokens.flush()
-    del numpy_tokens
+    tokens.tofile(bin_path)
+    np.save(npy_path, tokens)
+    token_count = tokens.size
 
     return bin_path, npy_path, token_count
 

@@ -917,9 +917,7 @@ def run_train_bpe(
     return idx_vocab_map, merges
 
 
-def apply_merge(
-    tid_pair: tuple[int, int], repl_tid: int, tid_list: list[int]
-) -> dict[tuple[int, int], int]:
+def apply_merge(tid_pair: tuple[int, int], repl_tid: int, tid_list: list[int]) -> dict[tuple[int, int], int]:
     tid_1, tid_2 = tid_pair
     write_i = 0
     match_flag = False
@@ -968,18 +966,30 @@ def apply_merge(
     return delta_map
 
 
-def _encode_pretoken(pretoken, vocab_idx_map, tid_pair_merge_map, cache):
+def _encode_pretoken(pretoken, vocab_idx_map, tid_pair_rank_map: dict[tuple[int, int], tuple[int, int]], cache):
     if pretoken in cache:
         return cache[pretoken]
     tid_list = [vocab_idx_map[bytes([x])] for x in pretoken.encode("utf-8")]
     tid_pair_ct_map = Counter(pairwise(tid_list))
 
-    merge_order_tid_pair_heap = [(tid_pair_rank_map[pair][0], pair, tid_pair_rank_map[pair][1]) for pair in tid_pair_ct_map]
-    while heap:
-
-        tid_pair = (vocab_idx_map[bytestr_1], vocab_idx_map[bytestr_2])
-        repl_tid = vocab_idx_map[bytestr_1 + bytestr_2]
+    rank_heap = [
+        (tid_pair_rank_map[pair][0], pair, tid_pair_rank_map[pair][1])
+        for pair in tid_pair_ct_map
+        if pair in tid_pair_rank_map
+    ]
+    heapq.heapify(rank_heap)
+    while rank_heap:
+        _, tid_pair, repl_tid = heapq.heappop(rank_heap)
+        if tid_pair not in tid_pair_ct_map or tid_pair_ct_map[tid_pair] <= 0:
+            continue
         delta_map = apply_merge(tid_pair=tid_pair, repl_tid=repl_tid, tid_list=tid_list)
+        for tid_pair, delta in delta_map.items():
+            if tid_pair not in tid_pair_ct_map and delta > 0 and tid_pair in tid_pair_rank_map:
+                rank, repl_tid = tid_pair_rank_map[tid_pair]
+                heapq.heappush(rank_heap, (rank, tid_pair, repl_tid))
+            tid_pair_ct_map[tid_pair] = tid_pair_ct_map.get(tid_pair, 0) + delta
+            if tid_pair_ct_map[tid_pair] <= 0:
+                del tid_pair_ct_map[tid_pair]
     cache[pretoken] = tid_list
     return tid_list
 
@@ -987,14 +997,14 @@ def _encode_pretoken(pretoken, vocab_idx_map, tid_pair_merge_map, cache):
 from tqdm import tqdm
 
 
-def _encode_text(text, sorted_special_tokens: list[str] | None, vocab_idx_map, merges):
+def _encode_text(text, sorted_special_tokens: list[str] | None, vocab_idx_map, tid_pair_rank_map):
     """Process a chunk of text into a map of counts of pairs of bytes"""
     tids = []
     cache = {}
     if sorted_special_tokens is None or not sorted_special_tokens:
         for match in re.finditer(_PAT, text):
             pretoken = match.group()
-            tids.extend(_encode_pretoken(pretoken, vocab_idx_map, merges, cache))
+            tids.extend(_encode_pretoken(pretoken, vocab_idx_map, tid_pair_rank_map, cache))
     else:
         special_re = re.compile("|".join([re.escape(st) for st in sorted_special_tokens]))
         cursor = 0
@@ -1002,13 +1012,13 @@ def _encode_text(text, sorted_special_tokens: list[str] | None, vocab_idx_map, m
             special_token = special.group()
             for match in re.finditer(_PAT, text, pos=cursor, endpos=special.start()):
                 pretoken = match.group()
-                tid_list = _encode_pretoken(pretoken, vocab_idx_map, merges, cache)
+                tid_list = _encode_pretoken(pretoken, vocab_idx_map, tid_pair_rank_map, cache)
                 tids.extend(list(tid_list))
             tids.append(vocab_idx_map[special_token.encode("utf-8")])
             cursor = special.end()
         for match in re.finditer(_PAT, text, pos=cursor):
             pretoken = match.group()
-            tid_list = _encode_pretoken(pretoken, vocab_idx_map, merges, cache)
+            tid_list = _encode_pretoken(pretoken, vocab_idx_map, tid_pair_rank_map, cache)
             tids.extend(tid_list)
     return tids
 
@@ -1026,6 +1036,11 @@ class Tokenizer:
         else:
             self._sorted_special_tokens = None
 
+        self._tid_pair_rank_map = {
+            (self._vocab_idx_map[token_1], self._vocab_idx_map[token_2]): (rank, self._vocab_idx_map[token_1 + token_2])
+            for rank, (token_1, token_2) in enumerate(self.merges)
+        }
+
     @classmethod
     def from_files(cls, vocab_filepath: str, merges_filepath: str, special_tokens: list[str] | None = None):
         with open(vocab_filepath) as in_f:
@@ -1037,7 +1052,7 @@ class Tokenizer:
         return cls(vocab_idx_map, merges_bytestrs, special_tokens)
 
     def encode(self, text: str) -> list[int]:
-        return _encode_text(text, self._sorted_special_tokens, self._vocab_idx_map, self.merges)
+        return _encode_text(text, self._sorted_special_tokens, self._vocab_idx_map, self._tid_pair_rank_map)
 
     def encode_iterable(self, iterable: Iterable[str]) -> Iterable[int]:
         for text in iterable:
