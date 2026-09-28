@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 import torch.nn.functional as F
-from einops import reduce
+from einops import rearrange, reduce
 
 
 @dataclass(eq=False)
@@ -88,3 +88,32 @@ class FFN(torch.nn.Module):
         if self.activation == "SwiGLU":
             activation_x = activation_x * self.w3(x)
         return self.w2(activation_x)
+
+
+@dataclass(eq=False)
+class RoPE(torch.nn.Module):
+    theta: float
+    d_k: int
+    max_seq_len: int
+    device: torch.device | None = None
+
+    def __post_init__(self):
+        super().__init__()
+
+        seq_indices = torch.arange(self.max_seq_len)
+        theta_exps = self.theta ** (-1 * (2 * torch.arange(1, self.d_k // 2 + 1) - 2) / self.d_k)
+        theta_vals = torch.outer(seq_indices, theta_exps)
+        cos_vals = torch.cos(theta_vals)
+        sin_vals = torch.sin(theta_vals)
+        rot_matrices = rearrange(
+            torch.stack([cos_vals, -1 * sin_vals, sin_vals, cos_vals], dim=-1),
+            "seq d (rot_row rot_col)-> seq d rot_row rot_col",
+            rot_row=2,
+        )
+        self.register_buffer("rot_matrices", rot_matrices, persistent=False)
+
+    def forward(self, x: torch.Tensor, token_positions: torch.Tensor) -> torch.Tensor:
+        rot_matrices = self.rot_matrices[token_positions]
+        rotatable_x = rearrange(x, "... (d rot) -> ... d rot ()", rot=2)
+        rotated_x = rot_matrices.matmul(rotatable_x)
+        return rearrange(rotated_x, "... d rot a -> ... (d rot a)")
