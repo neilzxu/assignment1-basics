@@ -4,7 +4,7 @@ import numpy as np
 import torch
 
 
-@dataclass
+@dataclass(eq=False)
 class Linear(torch.nn.Module):
     in_features: int
     out_features: int
@@ -21,3 +21,22 @@ class Linear(torch.nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.matmul(x, self._weight.T)
+
+
+@dataclass(eq=False)
+class Embedding(torch.nn.Module):
+    num_embeddings: int
+    embedding_dim: int
+    device: torch.device | None = None
+    dtype: torch.dtype | None = None
+
+    def __post_init__(self):
+        super().__init__()
+        self._embeddings = torch.nn.Parameter(
+            torch.empty(self.num_embeddings, self.embedding_dim, dtype=self.dtype, device=self.device)
+        )
+        sigma = 1
+        torch.nn.init.trunc_normal_(self._embeddings, 0, sigma, -3 * sigma, 3 * sigma)
+
+    def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
+        return self._embeddings[token_ids]
