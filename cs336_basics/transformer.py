@@ -117,3 +117,9 @@ class RoPE(torch.nn.Module):
         rotatable_x = rearrange(x, "... (d rot) -> ... d rot ()", rot=2)
         rotated_x = rot_matrices.matmul(rotatable_x)
         return rearrange(rotated_x, "... d rot a -> ... (d rot a)")
+
+
+def softmax(x: torch.Tensor, i: int) -> torch.Tensor:
+    max_elem = torch.amax(x, dim=i, keepdim=True)
+    deltas = x - max_elem
+    return torch.exp(deltas) / torch.exp(deltas).sum(dim=1, keepdim=True)
