@@ -2,6 +2,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from einops import reduce
 
 
@@ -60,3 +61,30 @@ class RMSNorm(torch.nn.Module):
         rms_x = reduce(x.square(), "... d -> ... 1", "mean")
         result = x * torch.rsqrt(rms_x + self.eps) * self._gain.to(torch.float32)
         return result.to(in_dtype)
+
+
+@dataclass(eq=False)
+class FFN(torch.nn.Module):
+    d_model: int
+    d_ff: int
+    activation: str = "SwiGLU"
+    device: torch.device | None = None
+    dtype: torch.dtype | None = None
+
+    @staticmethod
+    def calc_d_ff(d_model):
+        return int(8 / 3 * d_model / 64) * 64
+
+    def __post_init__(self):
+        super().__init__()
+        self.w1 = Linear(self.d_model, self.d_ff, self.device, self.dtype)
+        if self.activation == "SwiGLU":
+            self.w3 = Linear(self.d_model, self.d_ff, self.device, self.dtype)
+        self.w2 = Linear(self.d_ff, self.d_model, self.device, self.dtype)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        inner_prod = self.w1(x)
+        activation_x = inner_prod * F.sigmoid(inner_prod)
+        if self.activation == "SwiGLU":
+            activation_x = activation_x * self.w3(x)
+        return self.w2(activation_x)

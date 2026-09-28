@@ -85,12 +85,13 @@ def run_swiglu(
     """
     # Example:
     # If your state dict keys match, you can use `load_state_dict()`
-    # swiglu.load_state_dict(weights)
+    ffn = transformer.FFN(d_model, d_ff)
+    ffn.load_state_dict({"w1._weight": w1_weight, "w2._weight": w2_weight, "w3._weight": w3_weight})
     # You can also manually assign the weights
     # swiglu.w1.weight.data = w1_weight
     # swiglu.w2.weight.data = w2_weight
     # swiglu.w3.weight.data = w3_weight
-    raise NotImplementedError
+    return ffn(in_features)
 
 
 def run_scaled_dot_product_attention(
