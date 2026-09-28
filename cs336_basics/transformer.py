@@ -122,4 +122,12 @@ class RoPE(torch.nn.Module):
 def softmax(x: torch.Tensor, i: int) -> torch.Tensor:
     max_elem = torch.amax(x, dim=i, keepdim=True)
     deltas = x - max_elem
-    return torch.exp(deltas) / torch.exp(deltas).sum(dim=1, keepdim=True)
+    return torch.exp(deltas) / torch.exp(deltas).sum(dim=i, keepdim=True)
+
+
+def scaled_dot_product_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, mask: torch.Tensor):
+    d_k = K.size(-1)
+    scores = Q @ K.transpose(-1, -2) * (d_k ** (-0.5))
+    masked_scores = scores.masked_fill(~mask, float("-inf"))
+    weights = softmax(masked_scores, i=-1)
+    return weights @ V
