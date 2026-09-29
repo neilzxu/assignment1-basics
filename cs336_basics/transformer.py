@@ -113,7 +113,7 @@ class RoPE(torch.nn.Module):
         self.register_buffer("rot_matrices", rot_matrices, persistent=False)
 
     def forward(self, x: torch.Tensor, token_positions: torch.Tensor) -> torch.Tensor:
-        rot_matrices = self.rot_matrices[token_positions]
+        rot_matrices = self.rot_matrices.to(token_positions.device)[token_positions]
         rotatable_x = rearrange(x, "... (d rot) -> ... d rot ()", rot=2)
         rotated_x = rot_matrices.matmul(rotatable_x)
         return rearrange(rotated_x, "... d rot a -> ... (d rot a)")
@@ -131,3 +131,32 @@ def scaled_dot_product_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tens
     masked_scores = scores.masked_fill(~mask, float("-inf"))
     weights = softmax(masked_scores, i=-1)
     return weights @ V
+
+
+class CausalMultiheadSelfAttention(torch.nn.Module):
+    def __init__(self, d_model: int, num_heads: int, rope_layer: torch.nn.Module | None = None):
+        super().__init__()
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.rope_layer = rope_layer
+        self._Wq = Linear(self.d_model, self.d_model)
+        self._Wk = Linear(self.d_model, self.d_model)
+        self._Wv = Linear(self.d_model, self.d_model)
+        self._Wo = Linear(self.d_model, self.d_model)
+
+    def forward(self, x: torch.Tensor):
+
+        seq_len = x.size(-2)
+        Q, K, V = (self._Wq(x), self._Wk(x), self._Wv(x))
+
+        causal_mask = torch.tril(torch.ones((seq_len, seq_len), dtype=torch.bool, device=x.device))
+        Q_head = rearrange(Q, "... seq_len (head d) -> ... head seq_len d", head=self.num_heads)
+        K_head = rearrange(K, "... seq_len (head d) -> ... head seq_len d", head=self.num_heads)
+        V_head = rearrange(V, "... seq_len (head d) -> ... head seq_len d", head=self.num_heads)
+        if self.rope_layer is not None:
+            positions = torch.arange(seq_len, device=x.device)
+            Q_head = self.rope_layer(Q_head, positions)
+            K_head = self.rope_layer(K_head, positions)
+        head_attn = scaled_dot_product_attention(Q_head, K_head, V_head, causal_mask)
+        concat_attn = head_attn.transpose(-2, -3).flatten(-2, -1)
+        return self._Wo(concat_attn)
