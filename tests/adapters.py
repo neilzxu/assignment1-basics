@@ -33,7 +33,7 @@ def run_linear(
 
     layer = transformer.Linear(d_in, d_out)
     with torch.no_grad():
-        layer._weight.copy_(weights.to(layer._weight))
+        layer.weight.copy_(weights.to(layer.weight))
     return layer(in_features)
 
 
@@ -57,7 +57,7 @@ def run_embedding(
     """
     layer = transformer.Embedding(vocab_size, d_model)
     with torch.no_grad():
-        layer._embeddings.copy_(weights.to(layer._embeddings))
+        layer.embeddings.copy_(weights.to(layer.embeddings))
     return layer(token_ids)
 
 
@@ -86,7 +86,7 @@ def run_swiglu(
     # Example:
     # If your state dict keys match, you can use `load_state_dict()`
     ffn = transformer.FFN(d_model, d_ff)
-    ffn.load_state_dict({"w1._weight": w1_weight, "w2._weight": w2_weight, "w3._weight": w3_weight})
+    ffn.load_state_dict({"w1.weight": w1_weight, "w2.weight": w2_weight, "w3.weight": w3_weight})
     # You can also manually assign the weights
     # swiglu.w1.weight.data = w1_weight
     # swiglu.w2.weight.data = w2_weight
@@ -149,10 +149,10 @@ def run_multihead_self_attention(
     cmsa = transformer.CausalMultiheadSelfAttention(d_model, num_heads)
     cmsa.load_state_dict(
         {
-            "_Wq._weight": q_proj_weight,
-            "_Wk._weight": k_proj_weight,
-            "_Wv._weight": v_proj_weight,
-            "_Wo._weight": o_proj_weight,
+            "q_proj.weight": q_proj_weight,
+            "k_proj.weight": k_proj_weight,
+            "v_proj.weight": v_proj_weight,
+            "out_proj.weight": o_proj_weight,
         }
     )
     return cmsa(in_features)
@@ -199,10 +199,10 @@ def run_multihead_self_attention_with_rope(
     cmsa = transformer.CausalMultiheadSelfAttention(d_model, num_heads, rope_layer)
     cmsa.load_state_dict(
         {
-            "_Wq._weight": q_proj_weight,
-            "_Wk._weight": k_proj_weight,
-            "_Wv._weight": v_proj_weight,
-            "_Wo._weight": o_proj_weight,
+            "q_proj.weight": q_proj_weight,
+            "k_proj.weight": k_proj_weight,
+            "v_proj.weight": v_proj_weight,
+            "out_proj.weight": o_proj_weight,
         }
     )
     return cmsa(in_features)
@@ -302,7 +302,10 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    raise NotImplementedError
+    rope_layer = transformer.RoPE(theta, d_model // num_heads, max_seq_len)
+    block = transformer.TransformerBlock(d_model, num_heads, d_ff, rope_layer)
+    block.load_state_dict(weights)
+    return block(in_features)
 
 
 def run_transformer_lm(
@@ -409,7 +412,7 @@ def run_rmsnorm(
     """
     layer = transformer.RMSNorm(d_model, eps)
     with torch.no_grad():
-        layer._gain.copy_(weights.to(layer._gain))
+        layer.weight.copy_(weights.to(layer.weight))
     return layer(in_features)
 
 

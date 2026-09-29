@@ -15,14 +15,14 @@ class Linear(torch.nn.Module):
 
     def __post_init__(self):
         super().__init__()
-        self._weight = torch.nn.Parameter(
+        self.weight = torch.nn.Parameter(
             torch.empty(self.out_features, self.in_features, dtype=self.dtype, device=self.device)
         )
         sigma = np.sqrt(1 / (self.in_features + self.out_features))
-        torch.nn.init.trunc_normal_(self._weight, 0, sigma, -3 * sigma, 3 * sigma)
+        torch.nn.init.trunc_normal_(self.weight, 0, sigma, -3 * sigma, 3 * sigma)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.matmul(x, self._weight.T)
+        return torch.matmul(x, self.weight.T)
 
 
 @dataclass(eq=False)
@@ -34,14 +34,14 @@ class Embedding(torch.nn.Module):
 
     def __post_init__(self):
         super().__init__()
-        self._embeddings = torch.nn.Parameter(
+        self.embeddings = torch.nn.Parameter(
             torch.empty(self.num_embeddings, self.embedding_dim, dtype=self.dtype, device=self.device)
         )
         sigma = 1
-        torch.nn.init.trunc_normal_(self._embeddings, 0, sigma, -3 * sigma, 3 * sigma)
+        torch.nn.init.trunc_normal_(self.embeddings, 0, sigma, -3 * sigma, 3 * sigma)
 
     def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
-        return self._embeddings[token_ids]
+        return self.embeddings[token_ids]
 
 
 @dataclass(eq=False)
@@ -53,13 +53,13 @@ class RMSNorm(torch.nn.Module):
 
     def __post_init__(self):
         super().__init__()
-        self._gain = torch.nn.Parameter(torch.ones(self.d_model, device=self.device, dtype=self.dtype))
+        self.weight = torch.nn.Parameter(torch.ones(self.d_model, device=self.device, dtype=self.dtype))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         in_dtype = x.dtype
         x = x.to(torch.float32)
         rms_x = reduce(x.square(), "... d -> ... 1", "mean")
-        result = x * torch.rsqrt(rms_x + self.eps) * self._gain.to(torch.float32)
+        result = x * torch.rsqrt(rms_x + self.eps) * self.weight.to(torch.float32)
         return result.to(in_dtype)
 
 
@@ -100,7 +100,7 @@ class RoPE(torch.nn.Module):
     def __post_init__(self):
         super().__init__()
 
-        seq_indices = torch.arange(self.max_seq_len)
+        seq_indices = torch.arange(self.max_seq_len, device=self.device)
         theta_exps = self.theta ** (-1 * (2 * torch.arange(1, self.d_k // 2 + 1) - 2) / self.d_k)
         theta_vals = torch.outer(seq_indices, theta_exps)
         cos_vals = torch.cos(theta_vals)
@@ -134,20 +134,29 @@ def scaled_dot_product_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tens
 
 
 class CausalMultiheadSelfAttention(torch.nn.Module):
-    def __init__(self, d_model: int, num_heads: int, rope_layer: torch.nn.Module | None = None):
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        rope_layer: torch.nn.Module | None = None,
+        dtype: torch.dtype | None = None,
+        device: torch.device | None = None,
+    ):
         super().__init__()
         self.d_model = d_model
         self.num_heads = num_heads
         self.rope_layer = rope_layer
-        self._Wq = Linear(self.d_model, self.d_model)
-        self._Wk = Linear(self.d_model, self.d_model)
-        self._Wv = Linear(self.d_model, self.d_model)
-        self._Wo = Linear(self.d_model, self.d_model)
+        self.device = device
+        self.dtype = dtype
+        self.q_proj = Linear(self.d_model, self.d_model, device=self.device, dtype=self.dtype)
+        self.k_proj = Linear(self.d_model, self.d_model, device=self.device, dtype=self.dtype)
+        self.v_proj = Linear(self.d_model, self.d_model, device=self.device, dtype=self.dtype)
+        self.output_proj = Linear(self.d_model, self.d_model, device=self.device, dtype=self.dtype)
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
 
         seq_len = x.size(-2)
-        Q, K, V = (self._Wq(x), self._Wk(x), self._Wv(x))
+        Q, K, V = (self.q_proj(x), self.k_proj(x), self.v_proj(x))
 
         causal_mask = torch.tril(torch.ones((seq_len, seq_len), dtype=torch.bool, device=x.device))
         Q_head = rearrange(Q, "... seq_len (head d) -> ... head seq_len d", head=self.num_heads)
@@ -159,4 +168,35 @@ class CausalMultiheadSelfAttention(torch.nn.Module):
             K_head = self.rope_layer(K_head, positions)
         head_attn = scaled_dot_product_attention(Q_head, K_head, V_head, causal_mask)
         concat_attn = head_attn.transpose(-2, -3).flatten(-2, -1)
-        return self._Wo(concat_attn)
+        return self.output_proj(concat_attn)
+
+
+@dataclass(eq=False)
+class TransformerBlock(torch.nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        d_ff: int,
+        rope_layer: torch.nn.Module | None = None,
+        dtype: torch.dtype | None = None,
+        device: torch.device | None = None,
+    ):
+        super().__init__()
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_ff = d_ff
+        self.device = device
+        self.dtype = dtype
+        self.rope_layer = rope_layer
+
+        self.attn = CausalMultiheadSelfAttention(self.d_model, self.num_heads, self.rope_layer)
+        self.ln1 = RMSNorm(self.d_model, device=self.device, dtype=self.dtype)
+        self.ln2 = RMSNorm(self.d_model, device=self.device, dtype=self.dtype)
+        self.ffn = FFN(self.d_model, self.d_ff, device=self.device, dtype=self.dtype)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        norm_out_1 = self.ln1(x)
+        attn_out = x + self.attn(norm_out_1)
+        norm_out_2 = self.ln2(attn_out)
+        return attn_out + self.ffn(norm_out_2)
