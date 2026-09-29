@@ -34,14 +34,14 @@ class Embedding(torch.nn.Module):
 
     def __post_init__(self):
         super().__init__()
-        self.embeddings = torch.nn.Parameter(
+        self.weight = torch.nn.Parameter(
             torch.empty(self.num_embeddings, self.embedding_dim, dtype=self.dtype, device=self.device)
         )
         sigma = 1
-        torch.nn.init.trunc_normal_(self.embeddings, 0, sigma, -3 * sigma, 3 * sigma)
+        torch.nn.init.trunc_normal_(self.weight, 0, sigma, -3 * sigma, 3 * sigma)
 
     def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
-        return self.embeddings[token_ids]
+        return self.weight[token_ids]
 
 
 @dataclass(eq=False)
@@ -200,3 +200,49 @@ class TransformerBlock(torch.nn.Module):
         attn_out = x + self.attn(norm_out_1)
         norm_out_2 = self.ln2(attn_out)
         return attn_out + self.ffn(norm_out_2)
+
+
+@dataclass(eq=False)
+class TransformerLM(torch.nn.Module):
+    def __init__(
+        self,
+        vocab_size: int,
+        context_length: int,
+        num_layers: int,
+        d_model: int,
+        num_heads: int,
+        d_ff: int,
+        rope_theta: float,
+        dtype: torch.dtype | None = None,
+        device: torch.device | None = None,
+    ):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.context_length = context_length
+        self.num_layers = num_layers
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_ff = d_ff
+        self.rope_theta = rope_theta
+        self.device = device
+        self.dtype = dtype
+
+        self.d_k = self.d_model // self.num_heads
+
+        self.rope_layer = RoPE(theta=self.rope_theta, d_k=self.d_k, max_seq_len=self.context_length, device=self.device)
+
+        self.token_embeddings = Embedding(self.vocab_size, self.d_model, self.device, self.dtype)
+        self.layers = torch.nn.Sequential(
+            *[
+                TransformerBlock(self.d_model, self.num_heads, self.d_ff, self.rope_layer, self.dtype, self.device)
+                for i in range(self.num_layers)
+            ]
+        )
+        self.ln_final = RMSNorm(self.d_model, device=self.device, dtype=self.dtype)
+        self.lm_head = Linear(self.d_model, self.vocab_size, device=self.device, dtype=self.dtype)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        tok_embs = self.token_embeddings(x)
+        layer_out = self.layers(tok_embs)
+        norm_out = self.ln_final(layer_out)
+        return self.lm_head(norm_out)
