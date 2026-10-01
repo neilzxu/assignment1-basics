@@ -6,6 +6,21 @@ import torch.nn.functional as F
 from einops import rearrange, reduce
 
 
+def softmax(x: torch.Tensor, i: int) -> torch.Tensor:
+    max_elem = torch.amax(x, dim=i, keepdim=True)
+    deltas = x - max_elem
+    return torch.exp(deltas) / torch.exp(deltas).sum(dim=i, keepdim=True)
+
+
+def cross_entropy_softmax(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+
+    max_elem = torch.amax(logits, dim=-1, keepdim=True)
+    deltas = logits - max_elem
+    return -(
+        deltas.gather(-1, targets.unsqueeze(-1)).squeeze(-1) - torch.log(torch.exp(deltas).sum(dim=-1, keepdim=True))
+    ).mean()
+
+
 @dataclass(eq=False)
 class Linear(torch.nn.Module):
     in_features: int
@@ -117,12 +132,6 @@ class RoPE(torch.nn.Module):
         rotatable_x = rearrange(x, "... (d rot) -> ... d rot ()", rot=2)
         rotated_x = rot_matrices.matmul(rotatable_x)
         return rearrange(rotated_x, "... d rot a -> ... (d rot a)")
-
-
-def softmax(x: torch.Tensor, i: int) -> torch.Tensor:
-    max_elem = torch.amax(x, dim=i, keepdim=True)
-    deltas = x - max_elem
-    return torch.exp(deltas) / torch.exp(deltas).sum(dim=i, keepdim=True)
 
 
 def scaled_dot_product_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, mask: torch.Tensor):
