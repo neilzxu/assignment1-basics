@@ -8,6 +8,18 @@ import torch.nn.functional as F
 from einops import rearrange, reduce
 
 
+def get_lr_cosine_schedule(t, alpha_max, alpha_min, T_w, T_c):
+    assert T_w < T_c
+    assert t >= 0 and T_w > 0 and T_c > 0
+    if t < T_w:
+        return t / T_w * alpha_max
+    elif t <= T_c:
+        prop = (t - T_w) / (T_c - T_w)
+        return alpha_min + 0.5 * (1 + math.cos(prop * math.pi)) * (alpha_max - alpha_min)
+    else:
+        return alpha_min
+
+
 def softmax(x: torch.Tensor, i: int) -> torch.Tensor:
     max_elem = torch.amax(x, dim=i, keepdim=True)
     deltas = x - max_elem
