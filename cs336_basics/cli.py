@@ -9,8 +9,9 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
+import torch
 
-from cs336_basics import bpe
+from cs336_basics import bpe, transformer
 from cs336_basics.benchmark import run_with_stats
 
 
@@ -201,6 +202,22 @@ def cmd_tokenizer_experiments(_args: argparse.Namespace) -> None:
             print(f"encoded {path}: {token_count:,} tokens -> {bin_path} and {npy_path}")
 
 
+def cmd_sgd_toy(_args: argparse.Namespace) -> None:
+    init_val = 5 * torch.randn((10, 10))
+    # small lr (1, 10) too small to get close. Large lr ( 1e3) get close super fast but then just get worse. 1e2 is good though
+    for lr in [1, 10, 1e2, 1e3]:
+        weights = torch.nn.Parameter(init_val)
+        opt = transformer.SGD([weights], lr=lr)
+        losses = []
+        for t in range(10):
+            opt.zero_grad()  # Reset the gradients for all learnable parameters.
+            loss = (weights**2).mean()  # Compute a scalar loss value.
+            loss.backward()  # Run backward pass, which computes gradients.
+            losses.append(loss.item())
+            opt.step()  # Run optimizer step.
+        print(f"(lr {lr}) has losses {losses}")
+
+
 def cmd_train(_args: argparse.Namespace) -> None:
     """Run the transformer LM training loop."""
     raise NotImplementedError
@@ -234,6 +251,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Experiments w/ tokenizers",
     )
     tok_exp.set_defaults(func=cmd_tokenizer_experiments)
+    sgd_toy = subparsers.add_parser(
+        "sgd-toy",
+        help="Toy SGD example",
+    )
+    sgd_toy.set_defaults(func=cmd_sgd_toy)
 
     train = subparsers.add_parser(
         "train",

@@ -1,3 +1,5 @@
+import math
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -12,13 +14,76 @@ def softmax(x: torch.Tensor, i: int) -> torch.Tensor:
     return torch.exp(deltas) / torch.exp(deltas).sum(dim=i, keepdim=True)
 
 
-def cross_entropy_softmax(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+def _cross_entropy_softmax(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
 
     max_elem = torch.amax(logits, dim=-1, keepdim=True)
     deltas = logits - max_elem
     return -(
         deltas.gather(-1, targets.unsqueeze(-1)).squeeze(-1) - torch.log(torch.exp(deltas).sum(dim=-1, keepdim=True))
-    ).mean()
+    )
+
+
+def cross_entropy_softmax(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    return _cross_entropy_softmax(logits, targets).mean()
+
+
+def perplexity(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    return torch.exp(cross_entropy_softmax(logits, targets)).mean(dim=-1)
+
+
+class SGD(torch.optim.Optimizer):
+    def __init__(self, params, lr=1e-3):
+        if lr < 0:
+            raise ValueError(f"Invalid learning rate: {lr}")
+        defaults = {"lr": lr}
+        super().__init__(params, defaults)
+
+    def step(self, closure: Callable | None = None):
+        loss = None if closure is None else closure()
+        for group in self.param_groups:
+            lr = group["lr"]  # Get the learning rate.
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                state = self.state[p]  # Get state associated with p.
+                t = state.get("t", 0)  # Get iteration number from the state, or 0.
+                grad = p.grad.data  # Get the gradient of loss with respect to p.
+                p.data -= lr / math.sqrt(t + 1) * grad  # Update weight tensor in-place.
+                state["t"] = t + 1  # Increment iteration number.
+        return loss
+
+
+class AdamW(torch.optim.Optimizer):
+    def __init__(self, params, lr=1e-3, betas=(0.9, 0.95), eps=1e-8, weight_decay=0.2):
+        if lr < 0:
+            raise ValueError(f"Invalid learning rate: {lr}")
+        defaults = {"lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay}
+        super().__init__(params, defaults)
+
+    def step(self, closure: Callable | None = None):
+        loss = None if closure is None else closure()
+        for group in self.param_groups:
+            lr = group["lr"]  # Get the learning rate.
+            beta_1, beta_2 = group["betas"]  # Get the learning rate.
+            lam = group["weight_decay"]  # Get the learning rate.
+            eps = group["eps"]  # Get the learning rate.
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                state = self.state[p]  # Get state associated with p.
+                t = state.get("t", 1)  # Get iteration number from the state, or 0.
+                m = state.get("m", 0)  # Get iteration number from the state, or 0.
+                v = state.get("v", 0)  # Get iteration number from the state, or 0.
+                grad = p.grad.data  # Get the gradient of loss with respect to p.
+
+                alpha_t = lr * ((1 - beta_2**t) ** 0.5) / (1 - beta_1**t)
+                state["m"] = beta_1 * m + (1 - beta_1) * grad
+                state["v"] = beta_2 * v + (1 - beta_2) * (grad**2)
+                state["t"] = t + 1  # Increment iteration number.
+
+                p.data -= lr * lam * p.data  # weight decay
+                p.data -= alpha_t * state["m"] / (state["v"] ** 0.5 + eps)  # Update weight tensor in-place.
+        return loss
 
 
 @dataclass(eq=False)
