@@ -81,4 +81,27 @@ If we look at this for other models:
 
 we acn see that increasing the size (and keeping context length fixed) increases the proportion of FLOPs that are from dense matmuls. On the other hand, if we increase the context length, we see that computation becomes dominated by the attention computation.
 
+# AdamW resource accounting
+
+How much memory does training require? It would be something like.
+
+As we know the formula for parameters is `(layers x ((3 x (11/3 d_model) + 2) + 2 x vocab + 1) x d_model`.
+
+Activations, we can break down as follows:
+- RMSNorm: `batch x context_length x layer x 2 x d_model`
+- Attention: QKVO projections and weighted sum of values: `batch x context_length x layer x 5 x d_model` . `QK^T` and softmax is `batch x 2 x context_length^2 x layer`.
+- FFN: W_1 out, W_2 out, SiLU out, elementwise product are a total of `batch x context_length x layers x 4 x d_ff`. Including W_3 out this is `batch x context_length x layers x (4 x 8 / 3 + 1 = 11 2/3) x d_model`.
+- Final RMS Norm is just `batch x context_length x d_model`.
+- Output embedding is `batch x vocab_size` and the cross entropy term is just `batch x 1`.
+
+So this gets us a total of `batch x ((context_length x layer + 1) x 18 2/3 x d_model + layer x 2 x context_length^2 + vocab_size + 1)` activations.
+Gradients are computed on parameters and activations, and optimizer state is only computed for parameters once since the gradients are already accumulated (though it computes 2 state values per param).
+
+So our calculation means that we have `2A + 4P` where A is activations and P is parameters.
+
+This means we use 35.125 times batch plus 26.169 GB, which is batch size 1 under 80 GB assumption.
+
+Running AdamW for one step takes basically 3x forward (forward + backward gradient pass), so about 9.3 TFLOPS. The other optimization stuff scales with the size of parameters which is dominated by the matmul TFLOPS.
+
+400K * 1024 * 9.3 TFLOPS / 250 TFLOPS/s = ~4277 hrs = ~178 days.
 
