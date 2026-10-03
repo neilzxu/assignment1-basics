@@ -8,6 +8,20 @@ import torch.nn.functional as F
 from einops import rearrange, reduce
 
 
+def data_loader(
+    x: np.ndarray, batch_size: int, context_length: int, device_str: str = "cpu"
+) -> tuple[torch.Tensor, torch.Tensor]:
+    rng = np.random.default_rng()
+    indices = rng.choice(x.shape[0] - context_length, size=batch_size, replace=False)
+    contexts = torch.stack([torch.LongTensor(x[idx : (idx + context_length)]) for idx in indices]).to(
+        torch.device(device_str)
+    )
+    next_tokens = torch.stack([torch.LongTensor(x[(idx + 1) : (idx + 1 + context_length)]) for idx in indices]).to(
+        torch.device(device_str)
+    )
+    return contexts, next_tokens
+
+
 def grad_clip(parameters, max_l2_norm, eps=1e-6):
     with torch.no_grad():
         norm = sum([parameter.grad.square().sum() for parameter in parameters if parameter.grad is not None]) ** 0.5
