@@ -8,6 +8,16 @@ import torch.nn.functional as F
 from einops import rearrange, reduce
 
 
+def grad_clip(parameters, max_l2_norm, eps=1e-6):
+    with torch.no_grad():
+        norm = sum([parameter.grad.square().sum() for parameter in parameters if parameter.grad is not None]) ** 0.5
+        if norm > max_l2_norm:
+            scale = max_l2_norm / (norm + eps)
+            for parameter in parameters:
+                if parameter.grad is not None:
+                    parameter.grad *= scale
+
+
 def get_lr_cosine_schedule(t, alpha_max, alpha_min, T_w, T_c):
     assert T_w < T_c
     assert t >= 0 and T_w > 0 and T_c > 0
