@@ -1,11 +1,33 @@
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
+import os
+import typing
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from einops import rearrange, reduce
+
+
+def save_checkpoint(
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    iteration: int,
+    out: str | os.PathLike | typing.BinaryIO | typing.IO[bytes],
+):
+    torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(), "iteration": iteration}, out)
+
+
+def load_checkpoint(
+    src: str | os.PathLike | typing.BinaryIO | typing.IO[bytes],
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+):
+    save_dict = torch.load(src, map_location="cpu", weights_only=True)
+    model.load_state_dict(save_dict["model"])
+    optimizer.load_state_dict(save_dict["optimizer"])
+    return save_dict["iteration"]
 
 
 def data_loader(
