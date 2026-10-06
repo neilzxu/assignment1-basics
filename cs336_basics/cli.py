@@ -11,7 +11,7 @@ import numpy as np
 import torch
 from jsonargparse import ArgumentParser
 
-from cs336_basics import bpe, transformer, train
+from cs336_basics import bpe, train, transformer
 from cs336_basics.benchmark import run_with_stats
 from cs336_basics.config import TrainConfig
 

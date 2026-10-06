@@ -36,6 +36,7 @@ class TrainingConfig:
     device: str = "cpu"
     seed: int = 42
     log_interval: int = 10
+    overfit_one_batch: bool = False
 
 
 @dataclass
