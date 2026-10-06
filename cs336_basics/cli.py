@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 from collections.abc import Sequence
@@ -10,9 +9,11 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from jsonargparse import ArgumentParser
 
-from cs336_basics import bpe, transformer
+from cs336_basics import bpe, transformer, train
 from cs336_basics.benchmark import run_with_stats
+from cs336_basics.config import TrainConfig
 
 
 def _print_run_stats(label: str, stats) -> None:
@@ -218,9 +219,8 @@ def cmd_sgd_toy(_args: argparse.Namespace) -> None:
         print(f"(lr {lr}) has losses {losses}")
 
 
-def cmd_train(_args: argparse.Namespace) -> None:
-    """Run the transformer LM training loop."""
-    raise NotImplementedError
+def cmd_train(config: TrainConfig) -> None:
+    train.train_lm(config)
 
 
 def cmd_generate(_args: argparse.Namespace) -> None:
@@ -228,54 +228,101 @@ def cmd_generate(_args: argparse.Namespace) -> None:
     raise NotImplementedError
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+COMMAND_HANDLERS = {
+    "train-bpe-tinystories": cmd_train_bpe_tinystories,
+    "train-bpe-owt": cmd_train_bpe_owt,
+    "tok-exp": cmd_tokenizer_experiments,
+    "sgd-toy": cmd_sgd_toy,
+    "train": cmd_train,
+    "generate": cmd_generate,
+}
+
+
+def build_parser() -> ArgumentParser:
+    parser = ArgumentParser(
         prog="cs336",
         description="CS336 assignment scripts and experiments",
     )
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    subcommands = parser.add_subcommands(required=True)
 
-    train_bpe_tinystories = subparsers.add_parser(
-        "train-bpe-tinystories",
-        help="train BPE on TinyStories (Problem train_bpe_tinystories)",
-    )
-    train_bpe_tinystories.set_defaults(func=cmd_train_bpe_tinystories)
+    for name in COMMAND_HANDLERS:
+        command_parser = ArgumentParser()
 
-    train_bpe_owt = subparsers.add_parser(
-        "train-bpe-owt",
-        help="train BPE on OpenWebText (Problem train_bpe_expts_owt)",
-    )
-    train_bpe_owt.set_defaults(func=cmd_train_bpe_owt)
-    tok_exp = subparsers.add_parser(
-        "tok-exp",
-        help="Experiments w/ tokenizers",
-    )
-    tok_exp.set_defaults(func=cmd_tokenizer_experiments)
-    sgd_toy = subparsers.add_parser(
-        "sgd-toy",
-        help="Toy SGD example",
-    )
-    sgd_toy.set_defaults(func=cmd_sgd_toy)
+        if name == "train":
+            command_parser.add_argument("--config", action="config")
+            command_parser.add_class_arguments(TrainConfig)
 
-    train = subparsers.add_parser(
-        "train",
-        help="train a transformer LM (Problem training_together)",
-    )
-    train.set_defaults(func=cmd_train)
-
-    generate = subparsers.add_parser(
-        "generate",
-        help="generate text from a trained model",
-    )
-    generate.set_defaults(func=cmd_generate)
+        subcommands.add_subcommand(name, command_parser)
 
     return parser
 
 
+# def build_parser() -> argparse.ArgumentParser:
+#     parser = argparse.ArgumentParser(
+#         prog="cs336",
+#         description="CS336 assignment scripts and experiments",
+#     )
+#     subparsers = parser.add_subparsers(dest="command", required=True)
+#
+#     train_bpe_tinystories = subparsers.add_parser(
+#         "train-bpe-tinystories",
+#         help="train BPE on TinyStories (Problem train_bpe_tinystories)",
+#     )
+#     train_bpe_tinystories.set_defaults(func=cmd_train_bpe_tinystories)
+#
+#     train_bpe_owt = subparsers.add_parser(
+#         "train-bpe-owt",
+#         help="train BPE on OpenWebText (Problem train_bpe_expts_owt)",
+#     )
+#     train_bpe_owt.set_defaults(func=cmd_train_bpe_owt)
+#     tok_exp = subparsers.add_parser(
+#         "tok-exp",
+#         help="Experiments w/ tokenizers",
+#     )
+#     tok_exp.set_defaults(func=cmd_tokenizer_experiments)
+#     sgd_toy = subparsers.add_parser(
+#         "sgd-toy",
+#         help="Toy SGD example",
+#     )
+#     sgd_toy.set_defaults(func=cmd_sgd_toy)
+#
+#     train = subparsers.add_parser(
+#         "train",
+#         help="train a transformer LM (Problem training_together)",
+#     )
+#     train.set_defaults(func=cmd_train)
+#
+#     generate = subparsers.add_parser(
+#         "generate",
+#         help="generate text from a trained model",
+#     )
+#     generate.set_defaults(func=cmd_generate)
+#
+#     return parser
+#
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     parser = build_parser()
-    args = parser.parse_args(argv)
-    args.func(args)
+    parsed = parser.parse_args(argv)
+    instantiated = parser.instantiate(parsed)
+
+    command = instantiated.subcommand
+    command_args = instantiated[command]
+
+    if command == "train":
+        config_f = TrainConfig(
+            data=command_args.data,
+            model=command_args.model,
+            optimizer=command_args.optimizer,
+            training=command_args.training,
+            validation=command_args.validation,
+            checkpoint=command_args.checkpoint,
+        )
+        config_f.validate()
+        cmd_train(config_f)
+    else:
+        COMMAND_HANDLERS[command](command_args)
 
 
 if __name__ == "__main__":

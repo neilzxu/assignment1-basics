@@ -1,5 +1,7 @@
 artifacts/
 data/
+configs/
+wandb/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

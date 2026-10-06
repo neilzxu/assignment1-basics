@@ -1,13 +1,42 @@
 import math
-from collections.abc import Callable
-from dataclasses import dataclass
 import os
 import typing
+from collections.abc import Callable
+from dataclasses import dataclass
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from einops import rearrange, reduce
+
+from cs336_basics.config import ModelConfig, OptimizerConfig
+
+
+def decode(language_model, prompt, end_token, max_tokens, sampling="temp", temp=0.1, p=0.9):
+
+    # prompt is (seq_len)
+    with torch.no_grad():
+        text = prompt
+        for _ in range(max_tokens):
+            logits = language_model.decode_logits(text).unsqueeze(-2)  # (1, vocab)
+            probs = softmax(logits / temp, 0).squeeze(-1)  # (vocab)
+            if sampling != "temp":
+                sorted_probs = torch.sort(probs, descending=True)
+                nucleus_size = 1
+                total_mass = sorted_probs[0]
+                while total_mass < p:
+                    nucleus_size += 1
+                    total_mass += sorted_probs[nucleus_size - 1]
+                nucleus_probs, indices = probs.topk(nucleus_size)
+                next_idx = torch.multinomial(nucleus_probs, num_samples=1)
+                next_token = indices[next_idx]
+            else:
+                next_token = torch.multinomial(probs, num_samples=1)
+            text = torch.cat([text, next_token], dim=-1)
+            if next_token == end_token:
+                break
+        prompt_len = prompt.size(0)
+        return text[prompt_len:]
 
 
 def save_checkpoint(
@@ -31,9 +60,10 @@ def load_checkpoint(
 
 
 def data_loader(
-    x: np.ndarray, batch_size: int, context_length: int, device_str: str = "cpu"
+    x: np.ndarray, batch_size: int, context_length: int, device_str: str = "cpu", rng: np.random.Generator | None = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    rng = np.random.default_rng()
+    if rng is None:
+        rng = np.random.default_rng()
     indices = rng.choice(x.shape[0] - context_length, size=batch_size, replace=False)
     contexts = torch.stack([torch.LongTensor(x[idx : (idx + context_length)]) for idx in indices]).to(
         torch.device(device_str)
@@ -76,9 +106,7 @@ def _cross_entropy_softmax(logits: torch.Tensor, targets: torch.Tensor) -> torch
 
     max_elem = torch.amax(logits, dim=-1, keepdim=True)
     deltas = logits - max_elem
-    return -(
-        deltas.gather(-1, targets.unsqueeze(-1)).squeeze(-1) - torch.log(torch.exp(deltas).sum(dim=-1, keepdim=True))
-    )
+    return -(deltas.gather(-1, targets.unsqueeze(-1)).squeeze(-1) - torch.log(torch.exp(deltas).sum(dim=-1)))
 
 
 def cross_entropy_softmax(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
@@ -112,7 +140,11 @@ class SGD(torch.optim.Optimizer):
 
 
 class AdamW(torch.optim.Optimizer):
-    def __init__(self, params, lr=1e-3, betas=(0.9, 0.95), eps=1e-8, weight_decay=0.2):
+    @classmethod
+    def from_config(cls, params, config: OptimizerConfig) -> "AdamW":
+        return cls(params, lr=config.lr, betas=config.betas, eps=config.eps, weight_decay=config.weight_decay)
+
+    def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.2):
         if lr < 0:
             raise ValueError(f"Invalid learning rate: {lr}")
         defaults = {"lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay}
@@ -239,7 +271,7 @@ class RoPE(torch.nn.Module):
         super().__init__()
 
         seq_indices = torch.arange(self.max_seq_len, device=self.device)
-        theta_exps = self.theta ** (-1 * (2 * torch.arange(1, self.d_k // 2 + 1) - 2) / self.d_k)
+        theta_exps = self.theta ** (-1 * (2 * torch.arange(1, self.d_k // 2 + 1, device=self.device) - 2) / self.d_k)
         theta_vals = torch.outer(seq_indices, theta_exps)
         cos_vals = torch.cos(theta_vals)
         sin_vals = torch.sin(theta_vals)
@@ -322,7 +354,9 @@ class TransformerBlock(torch.nn.Module):
         self.dtype = dtype
         self.rope_layer = rope_layer
 
-        self.attn = CausalMultiheadSelfAttention(self.d_model, self.num_heads, self.rope_layer)
+        self.attn = CausalMultiheadSelfAttention(
+            self.d_model, self.num_heads, self.rope_layer, device=self.device, dtype=self.dtype
+        )
         self.ln1 = RMSNorm(self.d_model, device=self.device, dtype=self.dtype)
         self.ln2 = RMSNorm(self.d_model, device=self.device, dtype=self.dtype)
         self.ffn = FFN(self.d_model, self.d_ff, device=self.device, dtype=self.dtype)
@@ -336,6 +370,25 @@ class TransformerBlock(torch.nn.Module):
 
 @dataclass(eq=False)
 class TransformerLM(torch.nn.Module):
+    @classmethod
+    def from_config(
+        cls,
+        config: ModelConfig,
+        dtype: torch.dtype | None = None,
+        device: torch.device | None = None,
+    ) -> "TransformerLM":
+        return cls(
+            vocab_size=config.vocab_size,
+            context_length=config.context_length,
+            num_layers=config.num_layers,
+            d_model=config.d_model,
+            num_heads=config.num_heads,
+            d_ff=config.d_ff,
+            rope_theta=config.rope_theta,
+            dtype=dtype,
+            device=device,
+        )
+
     def __init__(
         self,
         vocab_size: int,
@@ -378,3 +431,11 @@ class TransformerLM(torch.nn.Module):
         layer_out = self.layers(tok_embs)
         norm_out = self.ln_final(layer_out)
         return self.lm_head(norm_out)
+
+    def decode_logits(self, x: torch.Tensor) -> torch.Tensor:
+        with torch.no_grad():
+            tok_embs = self.token_embeddings(x)
+            layer_out = self.layers(tok_embs)
+
+            norm_out = self.ln_final(layer_out[..., -1, :])
+            return self.lm_head(norm_out)
