@@ -70,3 +70,17 @@ class TrainConfig:
             raise ValueError("batch_size must be positive")
         if self.training.max_steps <= 0:
             raise ValueError("max_steps must be positive")
+
+
+@dataclass
+class DecodeConfig:
+    model: ModelConfig = field(default_factory=ModelConfig)
+    src: str = "artifacts/runs/tinystories/state.pt"
+    vocab_path: str = "artifacts/tinystories_vocab.json"
+    merges_path: str = "artifacts/tinystories_merges.json"
+    prompt: str = "Once upon a time"
+    device_str: str = "cpu"
+    max_tokens: int = 200
+    sampling: str = "temp"
+    temp: float = 0.8
+    p: float = 0.9

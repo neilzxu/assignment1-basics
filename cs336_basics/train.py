@@ -37,6 +37,7 @@ def train_lm(config: TrainConfig, project_name="cs336_1", name="train_lm"):
     )
 
     lm = TransformerLM.from_config(config.model, device=torch.device(config.training.device))
+    lm = torch.compile(lm, backend="aot_eager")
     optimizer = AdamW.from_config(lm.parameters(), config.optimizer)
     init_iter = 0
     if config.checkpoint.resume_from is not None:

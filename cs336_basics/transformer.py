@@ -13,30 +13,37 @@ from cs336_basics.config import ModelConfig, OptimizerConfig
 
 
 def decode(language_model, prompt, end_token, max_tokens, sampling="temp", temp=0.1, p=0.9):
+    if prompt.ndim != 1 or prompt.numel() == 0:
+        raise ValueError("prompt must be a nonempty 1D tensor of token IDs")
+    if not math.isfinite(temp) or temp <= 0:
+        raise ValueError("temp must be positive and finite")
+    if not 0 < p <= 1:
+        raise ValueError("p must be in (0, 1]")
+    if sampling not in ("temp", "top_p"):
+        raise ValueError("sampling must be temp or top_p")
+    if max_tokens < 0:
+        raise ValueError("max_tokens must be nonnegative")
 
-    # prompt is (seq_len)
     with torch.no_grad():
         text = prompt
         for _ in range(max_tokens):
-            logits = language_model.decode_logits(text).unsqueeze(-2)  # (1, vocab)
-            probs = softmax(logits / temp, 0).squeeze(-1)  # (vocab)
-            if sampling != "temp":
-                sorted_probs = torch.sort(probs, descending=True)
-                nucleus_size = 1
-                total_mass = sorted_probs[0]
-                while total_mass < p:
-                    nucleus_size += 1
-                    total_mass += sorted_probs[nucleus_size - 1]
-                nucleus_probs, indices = probs.topk(nucleus_size)
+            context = text[-language_model.context_length:]
+            logits = language_model.decode_logits(context)  # (vocab,)
+            probs = softmax(logits / temp, -1)
+            if sampling == "top_p":
+                sorted_probs, indices = torch.sort(probs, descending=True)
+                remove = sorted_probs.cumsum(dim=-1) >= p
+                remove[1:] = remove[:-1].clone()
+                remove[0] = False
+                nucleus_probs = sorted_probs.masked_fill(remove, 0)
                 next_idx = torch.multinomial(nucleus_probs, num_samples=1)
                 next_token = indices[next_idx]
             else:
                 next_token = torch.multinomial(probs, num_samples=1)
             text = torch.cat([text, next_token], dim=-1)
-            if next_token == end_token:
+            if next_token.item() == end_token:
                 break
-        prompt_len = prompt.size(0)
-        return text[prompt_len:]
+        return text[prompt.size(0):]
 
 
 def save_checkpoint(
@@ -51,11 +58,15 @@ def save_checkpoint(
 def load_checkpoint(
     src: str | os.PathLike | typing.BinaryIO | typing.IO[bytes],
     model: torch.nn.Module,
-    optimizer: torch.optim.Optimizer,
+    optimizer: torch.optim.Optimizer | None = None,
 ):
     save_dict = torch.load(src, map_location="cpu", weights_only=True)
-    model.load_state_dict(save_dict["model"])
-    optimizer.load_state_dict(save_dict["optimizer"])
+    model_state = save_dict["model"]
+    if model_state and all(key.startswith("_orig_mod.") for key in model_state) and not hasattr(model, "_orig_mod"):
+        model_state = {key.removeprefix("_orig_mod."): value for key, value in model_state.items()}
+    model.load_state_dict(model_state)
+    if optimizer is not None:
+        optimizer.load_state_dict(save_dict["optimizer"])
     return save_dict["iteration"]
 
 

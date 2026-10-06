@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Sequence
+from dataclasses import fields
 from pathlib import Path
 
 import numpy as np
@@ -13,7 +14,7 @@ from jsonargparse import ArgumentParser
 
 from cs336_basics import bpe, train, transformer
 from cs336_basics.benchmark import run_with_stats
-from cs336_basics.config import TrainConfig
+from cs336_basics.config import DecodeConfig, TrainConfig
 
 
 def _print_run_stats(label: str, stats) -> None:
@@ -223,9 +224,28 @@ def cmd_train(config: TrainConfig) -> None:
     train.train_lm(config)
 
 
-def cmd_generate(_args: argparse.Namespace) -> None:
+def cmd_generate(config: DecodeConfig) -> None:
     """Generate text from a trained checkpoint."""
-    raise NotImplementedError
+    tokenizer = bpe.Tokenizer.from_files(
+        config.vocab_path, config.merges_path, special_tokens=["<|endoftext|>"]
+    )
+    model = transformer.TransformerLM.from_config(config.model, device=torch.device(config.device_str))
+    transformer.load_checkpoint(config.src, model)
+    model.eval()
+    prompt_tokens = torch.tensor(
+        tokenizer.encode(config.prompt), dtype=torch.long, device=config.device_str
+    )
+    end_token = tokenizer.encode("<|endoftext|>")[0]
+    generated = transformer.decode(
+        model,
+        prompt_tokens,
+        end_token=end_token,
+        max_tokens=config.max_tokens,
+        sampling=config.sampling,
+        temp=config.temp,
+        p=config.p,
+    )
+    print(config.prompt + tokenizer.decode(generated.tolist()))
 
 
 COMMAND_HANDLERS = {
@@ -251,6 +271,9 @@ def build_parser() -> ArgumentParser:
         if name == "train":
             command_parser.add_argument("--config", action="config")
             command_parser.add_class_arguments(TrainConfig)
+        if name == "generate":
+            command_parser.add_argument("--config", action="config")
+            command_parser.add_class_arguments(DecodeConfig)
 
         subcommands.add_subcommand(name, command_parser)
 
@@ -321,6 +344,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
         config_f.validate()
         cmd_train(config_f)
+    elif command == "generate":
+        cmd_generate(DecodeConfig(**{field.name: command_args[field.name] for field in fields(DecodeConfig)}))
     else:
         COMMAND_HANDLERS[command](command_args)
 
